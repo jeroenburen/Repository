@@ -109,7 +109,7 @@
         -OutputFolder C:\Reports\Migration -LogTarget Both
 
 .NOTES
-    Version : 1.3.4
+    Version : 1.3.6
     Changelog:
       1.0.0  Initial release.
       1.0.1  Fixed Build-Map: replaced $_ with $obj inside foreach loop ($_ is
@@ -185,6 +185,17 @@
              .GetNewClosure() on the scriptblock before passing it to
              Compare-ObjectSets, which captures $GroupIdMap from the defining
              scope at the time Compare-Groups runs.
+      1.3.5  Fixed 'Get-SafeProp is not recognized' error inside the groups
+             compareFunc. .GetNewClosure() captures variables but not functions.
+             Replaced the remaining two Get-SafeProp calls (seeding the src/dst
+             expression stacks) with inline PSObject.Properties checks.
+      1.3.6  Fixed 'Get-SafeProp is not recognized' in ALL compare scriptblocks.
+             .GetNewClosure() captures variables but not script-level functions,
+             so every compareFunc had the same latent bug. Added a $SafeProp
+             scriptblock variable (identical logic to Get-SafeProp) that IS
+             captured by .GetNewClosure(). Replaced all Get-SafeProp calls
+             inside every compare scriptblock with '& $SafeProp'. Applied
+             .GetNewClosure() to all six Compare-ObjectSets call sites.
 #>
 
 [CmdletBinding()]
@@ -205,7 +216,7 @@ param(
     [string]$ServiceMappingFile = ''
 )
 
-$ScriptVersion = '1.3.4'
+$ScriptVersion = '1.3.6'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -376,6 +387,10 @@ function Get-SafeProp {
     if ($Obj.PSObject.Properties[$Name]) { return $Obj.$Name }
     return $null
 }
+# Scriptblock alias for Get-SafeProp — captured via .GetNewClosure() into
+# compare scriptblocks that are invoked with & from a child scope where
+# script-level functions are not visible.
+$SafeProp = { param($Obj,$Name); if ($null -eq $Obj) { return $null }; if ($Obj.PSObject.Properties[$Name]) { return $Obj.$Name }; return $null }
 
 function Format-Tags {
     param([object]$Obj)
@@ -539,8 +554,8 @@ function Compare-IPSets {
         }
 
         # IP addresses (order-insensitive)
-        $srcIPs = @(Get-SafeProp $src 'ip_addresses' | Sort-Object)
-        $dstIPs = @(Get-SafeProp $dst 'ip_addresses' | Sort-Object)
+        $srcIPs = @(& $SafeProp $src 'ip_addresses' | Sort-Object)
+        $dstIPs = @(& $SafeProp $dst 'ip_addresses' | Sort-Object)
         $added   = $dstIPs | Where-Object { $_ -notin $srcIPs }
         $removed = $srcIPs | Where-Object { $_ -notin $dstIPs }
         if ($added)   { $diffs += "addresses added on dst: $($added -join ', ')" }
@@ -550,7 +565,7 @@ function Compare-IPSets {
         return @{ Equal=$false; Detail=($diffs -join ' | ') }
     }
 
-    $c = Compare-ObjectSets -TypeLabel 'IPSet' -SrcMap $srcMap -DstMap $dstMap -CompareFunc $compareFunc
+    $c = Compare-ObjectSets -TypeLabel 'IPSet' -SrcMap $srcMap -DstMap $dstMap -CompareFunc $compareFunc.GetNewClosure()
     $Stats.IPSets_Match      += $c.Match
     $Stats.IPSets_Mismatch   += $c.Mismatch
     $Stats.IPSets_MissingDst += $c.MissingDst
@@ -594,8 +609,8 @@ function Compare-Services {
             }
         }
 
-        $srcEntries = @(Get-SafeProp $src 'service_entries')
-        $dstEntries = @(Get-SafeProp $dst 'service_entries')
+        $srcEntries = @(& $SafeProp $src 'service_entries')
+        $dstEntries = @(& $SafeProp $dst 'service_entries')
         if ($srcEntries.Count -ne $dstEntries.Count) {
             $diffs += "service_entries count: $($srcEntries.Count) → $($dstEntries.Count)"
         } else {
@@ -603,16 +618,16 @@ function Compare-Services {
             # differences between source and destination do not cause false mismatches.
             function Get-EntryKey {
                 param($entry)
-                $rt    = Get-SafeProp $entry 'resource_type'
-                $proto = Get-SafeProp $entry 'l4_protocol'
-                $dport = if ((Get-SafeProp $entry 'destination_ports') -is [array]) {
-                             (Get-SafeProp $entry 'destination_ports' | Sort-Object) -join ','
-                         } else { "$(Get-SafeProp $entry 'destination_ports')" }
-                $sport = if ((Get-SafeProp $entry 'source_ports') -is [array]) {
-                             (Get-SafeProp $entry 'source_ports' | Sort-Object) -join ','
-                         } else { "$(Get-SafeProp $entry 'source_ports')" }
-                $icmp  = Get-SafeProp $entry 'icmp_type'
-                $pnum  = Get-SafeProp $entry 'protocol_number'
+                $rt    = & $SafeProp $entry 'resource_type'
+                $proto = & $SafeProp $entry 'l4_protocol'
+                $dport = if ((& $SafeProp $entry 'destination_ports') -is [array]) {
+                             (& $SafeProp $entry 'destination_ports' | Sort-Object) -join ','
+                         } else { "$(& $SafeProp $entry 'destination_ports')" }
+                $sport = if ((& $SafeProp $entry 'source_ports') -is [array]) {
+                             (& $SafeProp $entry 'source_ports' | Sort-Object) -join ','
+                         } else { "$(& $SafeProp $entry 'source_ports')" }
+                $icmp  = & $SafeProp $entry 'icmp_type'
+                $pnum  = & $SafeProp $entry 'protocol_number'
                 return "$rt|$proto|$dport|$sport|$icmp|$pnum"
             }
 
@@ -626,7 +641,7 @@ function Compare-Services {
                     $diffs += "entry[$i] resource_type: $($se.resource_type) → $($de.resource_type)"
                 }
                 foreach ($f in @('l4_protocol','destination_ports','source_ports','icmp_type','protocol_number')) {
-                    $sv = Get-SafeProp $se $f; $dv = Get-SafeProp $de $f
+                    $sv = & $SafeProp $se $f; $dv = & $SafeProp $de $f
                     $svStr = if ($sv -is [array]) { ($sv | Sort-Object) -join ',' } else { "$sv" }
                     $dvStr = if ($dv -is [array]) { ($dv | Sort-Object) -join ',' } else { "$dv" }
                     if ($svStr -ne $dvStr) {
@@ -653,8 +668,8 @@ function Compare-Services {
             }
         }
 
-        $srcMembers = @(Get-SafeProp $src 'members' | ForEach-Object { $_.path } | Sort-Object)
-        $dstMembers = @(Get-SafeProp $dst 'members' | ForEach-Object { $_.path } | Sort-Object)
+        $srcMembers = @(& $SafeProp $src 'members' | ForEach-Object { $_.path } | Sort-Object)
+        $dstMembers = @(& $SafeProp $dst 'members' | ForEach-Object { $_.path } | Sort-Object)
         $added   = $dstMembers | Where-Object { $_ -notin $srcMembers }
         $removed = $srcMembers | Where-Object { $_ -notin $dstMembers }
         if ($added)   { $diffs += "members added on dst: $($added -join ', ')" }
@@ -665,7 +680,7 @@ function Compare-Services {
     }
 
     Write-Log "  --- Services ---" INFO
-    $c1 = Compare-ObjectSets -TypeLabel 'Service' -SrcMap $srcSvcs -DstMap $dstSvcs -CompareFunc $svcCompare -IdMap $ServiceIdMap
+    $c1 = Compare-ObjectSets -TypeLabel 'Service' -SrcMap $srcSvcs -DstMap $dstSvcs -CompareFunc $svcCompare.GetNewClosure() -IdMap $ServiceIdMap
     $Stats.Services_Match      += $c1.Match
     $Stats.Services_Mismatch   += $c1.Mismatch
     $Stats.Services_MissingDst += $c1.MissingDst
@@ -673,7 +688,7 @@ function Compare-Services {
     Write-Log "  Services result: $($c1.Match) match | $($c1.Mismatch) mismatch | $($c1.MissingDst) missing on dst | $($c1.MissingSrc) extra on dst" INFO
 
     Write-Log "  --- Service Groups ---" INFO
-    $c2 = Compare-ObjectSets -TypeLabel 'ServiceGroup' -SrcMap $srcSGs -DstMap $dstSGs -CompareFunc $sgCompare -IdMap $ServiceIdMap
+    $c2 = Compare-ObjectSets -TypeLabel 'ServiceGroup' -SrcMap $srcSGs -DstMap $dstSGs -CompareFunc $sgCompare.GetNewClosure() -IdMap $ServiceIdMap
     $Stats.SvcGroups_Match      += $c2.Match
     $Stats.SvcGroups_Mismatch   += $c2.Mismatch
     $Stats.SvcGroups_MissingDst += $c2.MissingDst
@@ -718,7 +733,7 @@ function Compare-Groups {
         # This means conditions/paths split across any structure compare equally.
         $srcLeaves = [System.Collections.Generic.List[object]]::new()
         $stack = [System.Collections.Generic.Stack[object]]::new()
-        foreach ($e in @(Get-SafeProp $src 'expression')) { $stack.Push($e) }
+        foreach ($e in @(if ($src.PSObject.Properties['expression']) { $src.expression } else { @() })) { $stack.Push($e) }
         while ($stack.Count -gt 0) {
             $e  = $stack.Pop()
             $rt = if ($e.PSObject.Properties['resource_type']) { $e.resource_type } else { '' }
@@ -731,7 +746,7 @@ function Compare-Groups {
 
         $dstLeaves = [System.Collections.Generic.List[object]]::new()
         $stack = [System.Collections.Generic.Stack[object]]::new()
-        foreach ($e in @(Get-SafeProp $dst 'expression')) { $stack.Push($e) }
+        foreach ($e in @(if ($dst.PSObject.Properties['expression']) { $dst.expression } else { @() })) { $stack.Push($e) }
         while ($stack.Count -gt 0) {
             $e  = $stack.Pop()
             $rt = if ($e.PSObject.Properties['resource_type']) { $e.resource_type } else { '' }
@@ -818,14 +833,14 @@ function Compare-Policies {
         $diffs = @()
         if ($src.display_name -ne $dst.display_name) { $diffs += "display_name: '$($src.display_name)' → '$($dst.display_name)'" }
         foreach ($f in @('category','sequence_number')) {
-            $sv = Get-SafeProp $src $f; $dv = Get-SafeProp $dst $f
+            $sv = & $SafeProp $src $f; $dv = & $SafeProp $dst $f
             if ("$sv" -ne "$dv") { $diffs += "${f}: '$sv' → '$dv'" }
         }
         if ($diffs.Count -eq 0) { return @{ Equal=$true; Detail='' } }
         return @{ Equal=$false; Detail=($diffs -join ' | ') }
     }
 
-    $pc = Compare-ObjectSets -TypeLabel 'Policy' -SrcMap $srcPolMap -DstMap $dstPolMap -CompareFunc $polCompare
+    $pc = Compare-ObjectSets -TypeLabel 'Policy' -SrcMap $srcPolMap -DstMap $dstPolMap -CompareFunc $polCompare.GetNewClosure()
     $Stats.Policies_Match      += $pc.Match
     $Stats.Policies_Mismatch   += $pc.Mismatch
     $Stats.Policies_MissingDst += $pc.MissingDst
@@ -838,11 +853,11 @@ function Compare-Policies {
         $diffs = @()
         if ($src.display_name -ne $dst.display_name) { $diffs += "display_name: '$($src.display_name)' → '$($dst.display_name)'" }
         foreach ($f in @('action','direction','ip_protocol','disabled','logged','sequence_number')) {
-            $sv = Get-SafeProp $src $f; $dv = Get-SafeProp $dst $f
+            $sv = & $SafeProp $src $f; $dv = & $SafeProp $dst $f
             if ("$sv" -ne "$dv") { $diffs += "${f}: '$sv' → '$dv'" }
         }
         foreach ($listField in @('sources_excluded','destinations_excluded')) {
-            $sv = Get-SafeProp $src $listField; $dv = Get-SafeProp $dst $listField
+            $sv = & $SafeProp $src $listField; $dv = & $SafeProp $dst $listField
             if ("$sv" -ne "$dv") { $diffs += "${listField}: '$sv' → '$dv'" }
         }
         if ($diffs.Count -eq 0) { return @{ Equal=$true; Detail='' } }
@@ -862,7 +877,7 @@ function Compare-Policies {
 
         Write-Log "    Rules — Source: $($srcRuleMap.Count)  |  Destination: $($dstRuleMap.Count)" INFO
 
-        $rc = Compare-ObjectSets -TypeLabel "Rule[$polName]" -SrcMap $srcRuleMap -DstMap $dstRuleMap -CompareFunc $ruleCompare
+        $rc = Compare-ObjectSets -TypeLabel "Rule[$polName]" -SrcMap $srcRuleMap -DstMap $dstRuleMap -CompareFunc $ruleCompare.GetNewClosure()
         $Stats.Rules_Match      += $rc.Match
         $Stats.Rules_Mismatch   += $rc.Mismatch
         $Stats.Rules_MissingDst += $rc.MissingDst
@@ -902,18 +917,18 @@ function Compare-Profiles {
 
         # Compare attributes (order-insensitive).
         # Each attribute has a 'key' and a 'value' array. Build canonical key=value strings and compare as sets.
-        $srcAttrs = @(Get-SafeProp $src 'attributes')
-        $dstAttrs = @(Get-SafeProp $dst 'attributes')
+        $srcAttrs = @(& $SafeProp $src 'attributes')
+        $dstAttrs = @(& $SafeProp $dst 'attributes')
 
         $srcAttrKeys = @($srcAttrs | ForEach-Object {
-            $k = Get-SafeProp $_ 'key'
-            $v = (@(Get-SafeProp $_ 'value') | Sort-Object) -join ','
+            $k = & $SafeProp $_ 'key'
+            $v = (@(& $SafeProp $_ 'value') | Sort-Object) -join ','
             "$k=$v"
         } | Sort-Object)
 
         $dstAttrKeys = @($dstAttrs | ForEach-Object {
-            $k = Get-SafeProp $_ 'key'
-            $v = (@(Get-SafeProp $_ 'value') | Sort-Object) -join ','
+            $k = & $SafeProp $_ 'key'
+            $v = (@(& $SafeProp $_ 'value') | Sort-Object) -join ','
             "$k=$v"
         } | Sort-Object)
 
@@ -926,7 +941,7 @@ function Compare-Profiles {
         return @{ Equal=$false; Detail=($diffs -join ' | ') }
     }
 
-    $c = Compare-ObjectSets -TypeLabel 'Profile' -SrcMap $srcMap -DstMap $dstMap -CompareFunc $profileCompare
+    $c = Compare-ObjectSets -TypeLabel 'Profile' -SrcMap $srcMap -DstMap $dstMap -CompareFunc $profileCompare.GetNewClosure()
     $Stats.Profiles_Match      += $c.Match
     $Stats.Profiles_Mismatch   += $c.Mismatch
     $Stats.Profiles_MissingDst += $c.MissingDst
