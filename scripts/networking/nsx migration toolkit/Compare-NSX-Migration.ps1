@@ -109,7 +109,7 @@
         -OutputFolder C:\Reports\Migration -LogTarget Both
 
 .NOTES
-    Version : 1.4.0
+    Version : 1.4.1
     Changelog:
       1.0.0  Initial release.
       1.0.1  Fixed Build-Map: replaced $_ with $obj inside foreach loop ($_ is
@@ -220,7 +220,7 @@ param(
     [string]$ServiceMappingFile = ''
 )
 
-$ScriptVersion = '1.4.0'
+$ScriptVersion = '1.4.1'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -554,8 +554,8 @@ function Compare-IPSets {
         }
 
         # IP addresses (order-insensitive)
-        $srcIPs = @(@($(if ($src.PSObject.Properties['ip_addresses']) { $src.'ip_addresses' })) | Sort-Object)
-        $dstIPs = @(@($(if ($dst.PSObject.Properties['ip_addresses']) { $dst.'ip_addresses' })) | Sort-Object)
+        $srcIPs = @($(if ($src.PSObject.Properties['ip_addresses']) { $src.'ip_addresses' }) | Where-Object { $null -ne $_ } | Sort-Object)
+        $dstIPs = @($(if ($dst.PSObject.Properties['ip_addresses']) { $dst.'ip_addresses' }) | Where-Object { $null -ne $_ } | Sort-Object)
         $added   = $dstIPs | Where-Object { $_ -notin $srcIPs }
         $removed = $srcIPs | Where-Object { $_ -notin $dstIPs }
         if ($added)   { $diffs += "addresses added on dst: $($added -join ', ')" }
@@ -609,8 +609,8 @@ function Compare-Services {
             }
         }
 
-        $srcEntries = @($(if ($src.PSObject.Properties['service_entries']) { $src.'service_entries' }))
-        $dstEntries = @($(if ($dst.PSObject.Properties['service_entries']) { $dst.'service_entries' }))
+        $srcEntries = @($(if ($src.PSObject.Properties['service_entries']) { $src.'service_entries' }) | Where-Object { $null -ne $_ })
+        $dstEntries = @($(if ($dst.PSObject.Properties['service_entries']) { $dst.'service_entries' }) | Where-Object { $null -ne $_ })
         if ($srcEntries.Count -ne $dstEntries.Count) {
             $diffs += "service_entries count: $($srcEntries.Count) → $($dstEntries.Count)"
         } else {
@@ -621,10 +621,10 @@ function Compare-Services {
                 $rt    = $(if ($entry.PSObject.Properties['resource_type']) { $entry.'resource_type' })
                 $proto = $(if ($entry.PSObject.Properties['l4_protocol']) { $entry.'l4_protocol' })
                 $dport = if (($(if ($entry.PSObject.Properties['destination_ports']) { $entry.'destination_ports' })) -is [array]) {
-                             (@($(if ($entry.PSObject.Properties['destination_ports']) { $entry.'destination_ports' })) | Sort-Object) -join ','
+                             ($(if ($entry.PSObject.Properties['destination_ports']) { $entry.'destination_ports' }) | Where-Object { $null -ne $_ } | Sort-Object) -join ','
                          } else { "$($(if ($entry.PSObject.Properties['destination_ports']) { $entry.'destination_ports' }))" }
                 $sport = if (($(if ($entry.PSObject.Properties['source_ports']) { $entry.'source_ports' })) -is [array]) {
-                             (@($(if ($entry.PSObject.Properties['source_ports']) { $entry.'source_ports' })) | Sort-Object) -join ','
+                             ($(if ($entry.PSObject.Properties['source_ports']) { $entry.'source_ports' }) | Where-Object { $null -ne $_ } | Sort-Object) -join ','
                          } else { "$($(if ($entry.PSObject.Properties['source_ports']) { $entry.'source_ports' }))" }
                 $icmp  = $(if ($entry.PSObject.Properties['icmp_type']) { $entry.'icmp_type' })
                 $pnum  = $(if ($entry.PSObject.Properties['protocol_number']) { $entry.'protocol_number' })
@@ -668,8 +668,8 @@ function Compare-Services {
             }
         }
 
-        $srcMembers = @(@($(if ($src.PSObject.Properties['members']) { $src.'members' })) | ForEach-Object { $_.path } | Sort-Object)
-        $dstMembers = @(@($(if ($dst.PSObject.Properties['members']) { $dst.'members' })) | ForEach-Object { $_.path } | Sort-Object)
+        $srcMembers = @($(if ($src.PSObject.Properties['members']) { $src.'members' }) | Where-Object { $null -ne $_ } | ForEach-Object { $_.path } | Sort-Object)
+        $dstMembers = @($(if ($dst.PSObject.Properties['members']) { $dst.'members' }) | Where-Object { $null -ne $_ } | ForEach-Object { $_.path } | Sort-Object)
         $added   = $dstMembers | Where-Object { $_ -notin $srcMembers }
         $removed = $srcMembers | Where-Object { $_ -notin $dstMembers }
         if ($added)   { $diffs += "members added on dst: $($added -join ', ')" }
@@ -919,18 +919,18 @@ function Compare-Profiles {
 
         # Compare attributes (order-insensitive).
         # Each attribute has a 'key' and a 'value' array. Build canonical key=value strings and compare as sets.
-        $srcAttrs = @($(if ($src.PSObject.Properties['attributes']) { $src.'attributes' }))
-        $dstAttrs = @($(if ($dst.PSObject.Properties['attributes']) { $dst.'attributes' }))
+        $srcAttrs = @($(if ($src.PSObject.Properties['attributes']) { $src.'attributes' }) | Where-Object { $null -ne $_ })
+        $dstAttrs = @($(if ($dst.PSObject.Properties['attributes']) { $dst.'attributes' }) | Where-Object { $null -ne $_ })
 
         $srcAttrKeys = @($srcAttrs | ForEach-Object {
             $k = $(if ($_.PSObject.Properties['key']) { $_.'key' })
-            $v = (@($(if ($_.PSObject.Properties['value']) { $_.'value' })) | Sort-Object) -join ','
+            $v = ($(if ($_.PSObject.Properties['value']) { $_.'value' }) | Where-Object { $null -ne $_ } | Sort-Object) -join ','
             "$k=$v"
         } | Sort-Object)
 
         $dstAttrKeys = @($dstAttrs | ForEach-Object {
             $k = $(if ($_.PSObject.Properties['key']) { $_.'key' })
-            $v = (@($(if ($_.PSObject.Properties['value']) { $_.'value' })) | Sort-Object) -join ','
+            $v = ($(if ($_.PSObject.Properties['value']) { $_.'value' }) | Where-Object { $null -ne $_ } | Sort-Object) -join ','
             "$k=$v"
         } | Sort-Object)
 
