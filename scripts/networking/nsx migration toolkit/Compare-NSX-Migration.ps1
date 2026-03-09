@@ -109,7 +109,7 @@
         -OutputFolder C:\Reports\Migration -LogTarget Both
 
 .NOTES
-    Version : 1.4.3
+    Version : 1.4.4
     Changelog:
       1.0.0  Initial release.
       1.0.1  Fixed Build-Map: replaced $_ with $obj inside foreach loop ($_ is
@@ -220,7 +220,7 @@ param(
     [string]$ServiceMappingFile = ''
 )
 
-$ScriptVersion = '1.4.3'
+$ScriptVersion = '1.4.4'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -476,7 +476,7 @@ function Compare-ObjectSets {
 
         if ($DstMap.ContainsKey($dstId)) {
             $dst    = $DstMap[$dstId]
-            $result = & $CompareFunc $src $dst $dstId
+            $result = & $CompareFunc $src $dst $dstId $IdMap
             if ($result.Equal) {
                 Write-Log "  ✔ MATCH        [$TypeLabel] $id ($name)$idNote" SUCCESS
                 Add-Finding -ObjectType $TypeLabel -ObjectId $id -DisplayName $name -Result 'MATCH' -Detail $idNote.Trim()
@@ -717,7 +717,7 @@ function Compare-Groups {
     Write-Log "  Source: $($srcMap.Count) custom Groups  |  Destination: $($dstMap.Count) custom Groups" INFO
 
     $compareFunc = {
-        param($src, $dst, $dstId)
+        param($src, $dst, $dstId, $idMap)
         $diffs = @()
 
         # Skip display_name check when the ID was remapped by sanitization — the
@@ -769,7 +769,7 @@ function Compare-Groups {
             if ($_.PSObject.Properties['paths']) { $_.paths }
         } | ForEach-Object {
             if ($_ -match '^(.*/)([^/]+)$') {
-                $mappedId = if ($GroupIdMap.ContainsKey($Matches[2])) { $GroupIdMap[$Matches[2]] } else { $Matches[2] }
+                $mappedId = if ($idMap -and $idMap.ContainsKey($Matches[2])) { $idMap[$Matches[2]] } else { $Matches[2] }
                 "$($Matches[1])$mappedId"
             } else { $_ }
         } | Sort-Object)
