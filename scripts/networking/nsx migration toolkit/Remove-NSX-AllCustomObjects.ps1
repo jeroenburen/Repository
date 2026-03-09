@@ -82,6 +82,14 @@
     .\Remove-NSX-AllCustomObjects.ps1 -NSXManager nsx9.corp.local `
         -RemovePolicies $true -RemoveGroups $true -RemoveServiceGroups $true `
         -RemoveServices $true -RemoveIPSets $true -ClearVMTags $true
+
+.NOTES
+    Changelog:
+      1.0.0  Initial release.
+      1.1.0  Merged Remove-ServiceGroups and Remove-Services into one
+             dependency-ordered function. Service groups and services are
+             now sorted topologically (dependents deleted first) using the
+             same iterative DFS used for security groups.
 #>
 
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
@@ -98,6 +106,8 @@ param(
     [ValidateSet('Screen','File','Both')]
     [string]$LogTarget = 'Screen'
 )
+
+$ScriptVersion = '1.1.0'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -385,51 +395,134 @@ function Remove-Groups {
 }
 
 # ═════════════════════════════════════════════════════════════
-# 3. REMOVE SERVICE GROUPS
+# 3 & 4. REMOVE SERVICE GROUPS AND SERVICES  (dependency-ordered)
+#
+# Service groups reference plain services via their members[] array.
+# Plain services can also wrap other services via NestedServiceServiceEntry.
+# Both types are fetched together, sorted topologically, and deleted
+# dependents-first so NSX never sees a DELETE on an object that still has
+# an active reference — which would produce a 400 Bad Request.
 # ═════════════════════════════════════════════════════════════
-function Remove-ServiceGroups {
-    Write-Log "━━━ Removing Service Groups ━━━" INFO
-    $all    = Get-AllPages -Path "/policy/api/v1/infra/services"
-    $custom = $all | Where-Object {
-        (Get-SafeProp $_ 'resource_type') -eq 'PolicyServiceGroup' -and
-        (Get-SafeProp $_ '_system_owned') -ne $true
-    }
+function Get-ServiceDependencies {
+    param([object]$Svc)
+    $deps = @()
 
-    if (-not $custom) { Write-Log "  No custom Service Groups found." WARN; return }
-
-    foreach ($sg in $custom) {
-        $id   = $sg.id
-        $path = "/policy/api/v1/infra/services/$id"
-
-        if ($PSCmdlet.ShouldProcess("Service Group '$id' ($($sg.display_name))", "DELETE")) {
-            $ok = Invoke-NSXDelete -Path $path
-            if ($ok) { $Stats.ServiceGroups++; Write-Log "  ✔ Deleted Service Group: $id ($($sg.display_name))" SUCCESS }
-            else      { $Stats.Errors++ }
+    # ServiceGroup members[] — each member.path = /infra/services/<id>
+    $members = Get-SafeProp $Svc 'members'
+    if ($members) {
+        foreach ($member in $members) {
+            $mPath = Get-SafeProp $member 'path'
+            if ($mPath -and $mPath -match '/services/([^/]+)$') { $deps += $Matches[1] }
         }
     }
-}
 
-# ═════════════════════════════════════════════════════════════
-# 4. REMOVE SERVICES
-# ═════════════════════════════════════════════════════════════
-function Remove-Services {
-    Write-Log "━━━ Removing Services ━━━" INFO
-    $all    = Get-AllPages -Path "/policy/api/v1/infra/services"
-    $custom = $all | Where-Object {
-        (Get-SafeProp $_ 'resource_type') -ne 'PolicyServiceGroup' -and
-        (Get-SafeProp $_ '_system_owned') -ne $true
+    # NestedServiceServiceEntry inside service_entries[]
+    $entries = Get-SafeProp $Svc 'service_entries'
+    if ($entries) {
+        foreach ($entry in $entries) {
+            $resType = Get-SafeProp $entry 'resource_type'
+            if ($resType -eq 'NestedServiceServiceEntry') {
+                $nPath = Get-SafeProp $entry 'nested_service_path'
+                if ($nPath -and $nPath -match '/services/([^/]+)$') { $deps += $Matches[1] }
+            }
+        }
     }
 
-    if (-not $custom) { Write-Log "  No custom Services found." WARN; return }
+    return $deps | Select-Object -Unique
+}
 
-    foreach ($svc in $custom) {
-        $id   = $svc.id
-        $path = "/policy/api/v1/infra/services/$id"
+function Sort-ServicesForDeletion {
+    <# Topological sort in reverse using an iterative post-order DFS.
+       Returns objects ordered so dependents (service groups, nested wrappers)
+       are deleted before the services they depend on. #>
+    param([object[]]$Services)
 
-        if ($PSCmdlet.ShouldProcess("Service '$id' ($($svc.display_name))", "DELETE")) {
+    $lookup = @{}
+    $depMap = @{}
+    foreach ($s in $Services) {
+        $lookup[$s.id] = $s
+        $depMap[$s.id] = @(Get-ServiceDependencies -Svc $s)
+    }
+
+    $sorted   = [System.Collections.Generic.List[object]]::new()
+    $visited  = @{}
+    $inResult = @{}
+
+    foreach ($startId in $lookup.Keys) {
+        if ($visited[$startId] -eq 2) { continue }
+
+        $stack = [System.Collections.Generic.Stack[hashtable]]::new()
+        $stack.Push(@{ Id = $startId; Deps = @($depMap[$startId]); Index = 0 })
+        $visited[$startId] = 1
+
+        while ($stack.Count -gt 0) {
+            $frame = $stack.Peek()
+            $id    = $frame.Id
+            $deps  = $frame.Deps
+            $idx   = $frame.Index
+
+            if ($idx -lt $deps.Count) {
+                $frame.Index++
+                $depId = $deps[$idx]
+
+                if (-not $lookup.ContainsKey($depId)) { continue }
+
+                $depState = if ($visited.ContainsKey($depId)) { $visited[$depId] } else { 0 }
+
+                if ($depState -eq 1) {
+                    Write-Log "    Circular service dependency between '$id' and '$depId'." WARN
+                    continue
+                }
+                if ($depState -eq 2) { continue }
+
+                $visited[$depId] = 1
+                $stack.Push(@{ Id = $depId; Deps = @($depMap[$depId]); Index = 0 })
+            } else {
+                $stack.Pop() | Out-Null
+                $visited[$id] = 2
+                if (-not $inResult[$id] -and $lookup.ContainsKey($id)) {
+                    $sorted.Add($lookup[$id])
+                    $inResult[$id] = $true
+                }
+            }
+        }
+    }
+
+    # Reverse: dependents must be deleted before their dependencies
+    $arr = $sorted.ToArray()
+    [Array]::Reverse($arr)
+    return $arr
+}
+
+function Remove-ServicesAndGroups {
+    Write-Log "━━━ Removing Service Groups and Services ━━━" INFO
+    $all = Get-AllPages -Path "/policy/api/v1/infra/services"
+
+    # Collect service groups and plain services into one list, excluding system-owned
+    $custom = @($all | Where-Object { (Get-SafeProp $_ '_system_owned') -ne $true })
+
+    if (-not $custom) { Write-Log "  No custom Services or Service Groups found." WARN; return }
+
+    $sgCount  = @($custom | Where-Object { (Get-SafeProp $_ 'resource_type') -eq 'PolicyServiceGroup' }).Count
+    $svcCount = $custom.Count - $sgCount
+    Write-Log "  Found $sgCount service group(s) and $svcCount service(s). Resolving deletion order..." INFO
+
+    $ordered = Sort-ServicesForDeletion -Services $custom
+
+    foreach ($svc in $ordered) {
+        $id      = $svc.id
+        $path    = "/policy/api/v1/infra/services/$id"
+        $isGroup = (Get-SafeProp $svc 'resource_type') -eq 'PolicyServiceGroup'
+        $label   = if ($isGroup) { 'Service Group' } else { 'Service' }
+
+        if ($PSCmdlet.ShouldProcess("${label} '$id' ($($svc.display_name))", "DELETE")) {
             $ok = Invoke-NSXDelete -Path $path
-            if ($ok) { $Stats.Services++; Write-Log "  ✔ Deleted Service: $id ($($svc.display_name))" SUCCESS }
-            else      { $Stats.Errors++ }
+            if ($ok) {
+                if ($isGroup) { $Stats.ServiceGroups++ } else { $Stats.Services++ }
+                Write-Log "  ✔ Deleted ${label}: $id ($($svc.display_name))" SUCCESS
+            } else {
+                $Stats.Errors++
+            }
         }
     }
 }
@@ -557,12 +650,11 @@ try {
     if ($info) { Write-Log "  Connected: NSX $($info.product_version)" SUCCESS }
     else        { throw "Cannot connect to NSX Manager $NSXManager." }
 
-    if ($RemovePolicies)      { Remove-Policies      }
-    if ($RemoveGroups)        { Remove-Groups        }
-    if ($RemoveServiceGroups) { Remove-ServiceGroups }
-    if ($RemoveServices)      { Remove-Services      }
-    if ($RemoveIPSets)        { Remove-IPSets        }
-    if ($ClearVMTags)         { Clear-VMTags         }
+    if ($RemovePolicies)                          { Remove-Policies      }
+    if ($RemoveServiceGroups -or $RemoveServices) { Remove-ServicesAndGroups }
+    if ($RemoveServices)                          { Remove-Services      }
+    if ($RemoveIPSets)                            { Remove-IPSets        }
+    if ($ClearVMTags)                             { Clear-VMTags         }
 
 } catch {
     Write-Log "FATAL: $_" ERROR
