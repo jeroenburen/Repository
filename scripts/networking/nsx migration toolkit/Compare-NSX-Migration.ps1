@@ -106,7 +106,7 @@
         -OutputFolder C:\Reports\Migration -LogTarget Both
 
 .NOTES
-    Version : 1.2.2
+    Version : 1.2.3
     Changelog:
       1.0.0  Initial release.
       1.0.1  Fixed Build-Map: replaced $_ with $obj inside foreach loop ($_ is
@@ -138,6 +138,10 @@
              to differ when an ID mapping exists. Compare-ObjectSets now passes
              the resolved $dstId to the compare function, and $svcCompare /
              $sgCompare skip the display_name check when the ID was remapped.
+      1.2.3  Fixed same false display_name MISMATCH for security groups when a
+             group mapping file is provided. The groups compareFunc now also
+             accepts $dstId and skips the display_name check when the ID was
+             remapped by the sanitization pipeline.
 #>
 
 [CmdletBinding()]
@@ -149,7 +153,7 @@ param(
     [string]$LogFile         = '',
     [ValidateSet('Screen','File','Both')]
     [string]$LogTarget       = 'Screen',
-    [bool]$CompareIPSets     = $true,
+    [bool]$CompareIPSets     = $false,  # IP Sets are not part of the NSX DFW export and import process, so they are excluded from the comparison by default. Set to $true to include them.
     [bool]$CompareServices   = $true,
     [bool]$CompareGroups     = $true,
     [bool]$ComparePolicies   = $true,
@@ -157,7 +161,7 @@ param(
     [string]$ServiceMappingFile = ''
 )
 
-$ScriptVersion = '1.2.2'
+$ScriptVersion = '1.2.3'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -651,11 +655,15 @@ function Compare-Groups {
     Write-Log "  Source: $($srcMap.Count) custom Groups  |  Destination: $($dstMap.Count) custom Groups" INFO
 
     $compareFunc = {
-        param($src, $dst)
+        param($src, $dst, $dstId)
         $diffs = @()
 
-        if ($src.display_name -ne $dst.display_name) {
-            $diffs += "display_name: '$($src.display_name)' → '$($dst.display_name)'"
+        # Skip display_name check when the ID was remapped by sanitization — the
+        # destination display_name is expected to differ (it was renamed to match the new ID).
+        if (-not $dstId -or $src.id -eq $dstId) {
+            if ($src.display_name -ne $dst.display_name) {
+                $diffs += "display_name: '$($src.display_name)' → '$($dst.display_name)'"
+            }
         }
 
         # Compare expression count and types
