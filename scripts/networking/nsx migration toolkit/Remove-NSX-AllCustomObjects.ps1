@@ -11,10 +11,11 @@
     Deletion order respects dependencies:
       1. DFW Rules
       2. DFW Policies
-      3. Security Groups  (dependency-ordered)
-      4. Service Groups
-      5. Services
-      6. IP Sets
+      3. Context Profiles
+      4. Security Groups  (dependency-ordered)
+      5. Service Groups
+      6. Services
+      7. IP Sets
 
     VM tags are never deleted automatically. Use -ClearVMTags $true to clear them,
     which will prompt for a tag scope filter to avoid wiping unrelated tags.
@@ -42,6 +43,12 @@
 .PARAMETER RemoveGroups
     Remove all custom Security Groups. Default: $false
 
+.PARAMETER RemoveProfiles
+    Remove all custom Context Profiles. Default: $false
+    Only non-system-owned profiles are removed. System profiles bundled with
+    NSX are never touched. Profiles are deleted after policies and rules,
+    since rules may reference profiles by path.
+
 .PARAMETER RemovePolicies
     Remove all custom DFW Policies and their Rules. Default: $false
 
@@ -63,8 +70,8 @@
 .EXAMPLE
     # Preview everything that would be removed
     .\Remove-NSX-AllCustomObjects.ps1 -NSXManager nsx9.corp.local -WhatIf `
-        -RemovePolicies $true -RemoveGroups $true -RemoveServiceGroups $true `
-        -RemoveServices $true -RemoveIPSets $true
+        -RemovePolicies $true -RemoveProfiles $true -RemoveGroups $true `
+        -RemoveServiceGroups $true -RemoveServices $true -RemoveIPSets $true
 
 .EXAMPLE
     # Remove only policies and groups
@@ -74,14 +81,15 @@
 .EXAMPLE
     # Full cleanup of all custom DFW objects
     .\Remove-NSX-AllCustomObjects.ps1 -NSXManager nsx9.corp.local `
-        -RemovePolicies $true -RemoveGroups $true -RemoveServiceGroups $true `
-        -RemoveServices $true -RemoveIPSets $true
+        -RemovePolicies $true -RemoveProfiles $true -RemoveGroups $true `
+        -RemoveServiceGroups $true -RemoveServices $true -RemoveIPSets $true
 
 .EXAMPLE
     # Full cleanup including VM tags scoped to "env"
     .\Remove-NSX-AllCustomObjects.ps1 -NSXManager nsx9.corp.local `
-        -RemovePolicies $true -RemoveGroups $true -RemoveServiceGroups $true `
-        -RemoveServices $true -RemoveIPSets $true -ClearVMTags $true
+        -RemovePolicies $true -RemoveProfiles $true -RemoveGroups $true `
+        -RemoveServiceGroups $true -RemoveServices $true -RemoveIPSets $true `
+        -ClearVMTags $true
 
 .NOTES
     Changelog:
@@ -90,6 +98,9 @@
              dependency-ordered function. Service groups and services are
              now sorted topologically (dependents deleted first) using the
              same iterative DFS used for security groups.
+      1.2.0  Added -RemoveProfiles flag and Remove-Profiles function for
+             custom Context Profiles. Profiles are deleted after policies
+             and rules (step 3) and before security groups.
 #>
 
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
@@ -100,6 +111,7 @@ param(
     [bool]$RemoveServices        = $false,
     [bool]$RemoveServiceGroups   = $false,
     [bool]$RemoveGroups          = $false,
+    [bool]$RemoveProfiles        = $false,
     [bool]$RemovePolicies        = $false,
     [bool]$ClearVMTags           = $false,
     [string]$LogFile   = '',
@@ -107,7 +119,7 @@ param(
     [string]$LogTarget = 'Screen'
 )
 
-$ScriptVersion = '1.1.0'
+$ScriptVersion = '1.2.0'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -248,7 +260,7 @@ function Get-SafeProp {
 # ─────────────────────────────────────────────────────────────
 # STATISTICS
 # ─────────────────────────────────────────────────────────────
-$Stats = @{ Policies=0; Rules=0; Groups=0; ServiceGroups=0; Services=0; IPSets=0; VMsCleared=0; Errors=0 }
+$Stats = @{ Policies=0; Rules=0; Profiles=0; Groups=0; ServiceGroups=0; Services=0; IPSets=0; VMsCleared=0; Errors=0 }
 
 # ═════════════════════════════════════════════════════════════
 # 1. REMOVE DFW POLICIES
@@ -285,7 +297,31 @@ function Remove-Policies {
 }
 
 # ═════════════════════════════════════════════════════════════
-# 2. REMOVE SECURITY GROUPS  (dependency-ordered)
+# 3. REMOVE CONTEXT PROFILES
+# ═════════════════════════════════════════════════════════════
+function Remove-Profiles {
+    Write-Log "━━━ Removing Context Profiles ━━━" INFO
+    $all    = Get-AllPages -Path "/policy/api/v1/infra/context-profiles"
+    $custom = $all | Where-Object { (Get-SafeProp $_ '_system_owned') -ne $true }
+
+    if (-not $custom) { Write-Log "  No custom Context Profiles found." WARN; return }
+
+    Write-Log "  Found $(@($custom).Count) custom Context Profile(s)." INFO
+
+    foreach ($prof in $custom) {
+        $id   = $prof.id
+        $path = "/policy/api/v1/infra/context-profiles/$id"
+
+        if ($PSCmdlet.ShouldProcess("Context Profile '$id' ($($prof.display_name))", "DELETE")) {
+            $ok = Invoke-NSXDelete -Path $path
+            if ($ok) { $Stats.Profiles++; Write-Log "  ✔ Deleted Context Profile: $id ($($prof.display_name))" SUCCESS }
+            else      { $Stats.Errors++ }
+        }
+    }
+}
+
+# ═════════════════════════════════════════════════════════════
+# 4. REMOVE SECURITY GROUPS  (dependency-ordered)
 # ═════════════════════════════════════════════════════════════
 function Get-GroupDependencies {
     param([object]$Grp)
@@ -408,7 +444,7 @@ function Remove-Groups {
 }
 
 # ═════════════════════════════════════════════════════════════
-# 3 & 4. REMOVE SERVICE GROUPS AND SERVICES  (dependency-ordered)
+# 5 & 6. REMOVE SERVICE GROUPS AND SERVICES  (dependency-ordered)
 #
 # Service groups reference plain services via their members[] array.
 # Plain services can also wrap other services via NestedServiceServiceEntry.
@@ -541,7 +577,7 @@ function Remove-ServicesAndGroups {
 }
 
 # ═════════════════════════════════════════════════════════════
-# 5. REMOVE IP SETS
+# 7. REMOVE IP SETS
 # ═════════════════════════════════════════════════════════════
 function Remove-IPSets {
     Write-Log "━━━ Removing IP Sets ━━━" INFO
@@ -563,7 +599,7 @@ function Remove-IPSets {
 }
 
 # ═════════════════════════════════════════════════════════════
-# 6. CLEAR VM TAGS  (optional, with scope filter)
+# 8. CLEAR VM TAGS  (optional, with scope filter)
 # ═════════════════════════════════════════════════════════════
 function Clear-VMTags {
     Write-Log "━━━ Clearing VM Tags ━━━" INFO
@@ -633,7 +669,7 @@ function Clear-VMTags {
 # ═════════════════════════════════════════════════════════════
 
 # Guard — refuse to run if no action flags are set
-$anyAction = $RemovePolicies -or $RemoveGroups -or $RemoveServiceGroups -or
+$anyAction = $RemovePolicies -or $RemoveProfiles -or $RemoveGroups -or $RemoveServiceGroups -or
              $RemoveServices -or $RemoveIPSets -or $ClearVMTags
 
 if (-not $anyAction) {
@@ -647,6 +683,7 @@ Write-Log " NSX INVENTORY-BASED CLEANUP" INFO
 Write-Log " Target          : $NSXManager" INFO
 Write-Log " Domain          : $DomainId" INFO
 Write-Log " Remove Policies : $RemovePolicies" INFO
+Write-Log " Remove Profiles : $RemoveProfiles" INFO
 Write-Log " Remove Groups   : $RemoveGroups" INFO
 Write-Log " Remove Svc Grps : $RemoveServiceGroups" INFO
 Write-Log " Remove Services : $RemoveServices" INFO
@@ -664,6 +701,7 @@ try {
     else        { throw "Cannot connect to NSX Manager $NSXManager." }
 
     if ($RemovePolicies)                          { Remove-Policies          }
+    if ($RemoveProfiles)                          { Remove-Profiles          }
     if ($RemoveServiceGroups -or $RemoveServices) { Remove-ServicesAndGroups }
     if ($RemoveGroups)                            { Remove-Groups            }
     if ($RemoveIPSets)                            { Remove-IPSets            }
@@ -678,6 +716,7 @@ try {
     Write-Log "────────────────────────────────────────────" INFO
     Write-Log "  Policies deleted         : $($Stats.Policies)"      INFO
     Write-Log "  Rules removed (with pol) : $($Stats.Rules)"         INFO
+    Write-Log "  Profiles deleted         : $($Stats.Profiles)"      INFO
     Write-Log "  Groups deleted           : $($Stats.Groups)"        INFO
     Write-Log "  Service Groups deleted   : $($Stats.ServiceGroups)" INFO
     Write-Log "  Services deleted         : $($Stats.Services)"      INFO
