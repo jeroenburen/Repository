@@ -106,7 +106,7 @@
         -OutputFolder C:\Reports\Migration -LogTarget Both
 
 .NOTES
-    Version : 1.2.1
+    Version : 1.2.2
     Changelog:
       1.0.0  Initial release.
       1.0.1  Fixed Build-Map: replaced $_ with $obj inside foreach loop ($_ is
@@ -132,6 +132,12 @@
              Sort-Object unwraps single-item arrays to a scalar under
              Set-StrictMode. Wrapped $srcSorted and $dstSorted in @() to
              guarantee array type regardless of entry count.
+      1.2.2  Fixed false display_name MISMATCH on services and service groups
+             when a service mapping file is provided. The sanitization pipeline
+             renames display_name to match the new ID, so the name is expected
+             to differ when an ID mapping exists. Compare-ObjectSets now passes
+             the resolved $dstId to the compare function, and $svcCompare /
+             $sgCompare skip the display_name check when the ID was remapped.
 #>
 
 [CmdletBinding()]
@@ -151,7 +157,7 @@ param(
     [string]$ServiceMappingFile = ''
 )
 
-$ScriptVersion = '1.2.1'
+$ScriptVersion = '1.2.2'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -406,7 +412,7 @@ function Compare-ObjectSets {
 
         if ($DstMap.ContainsKey($dstId)) {
             $dst    = $DstMap[$dstId]
-            $result = & $CompareFunc $src $dst
+            $result = & $CompareFunc $src $dst $dstId
             if ($result.Equal) {
                 Write-Log "  ✔ MATCH        [$TypeLabel] $id ($name)$idNote" SUCCESS
                 Add-Finding -ObjectType $TypeLabel -ObjectId $id -DisplayName $name -Result 'MATCH' -Detail $idNote.Trim()
@@ -528,11 +534,15 @@ function Compare-Services {
 
     # Service compare: check display_name + service_entries count + protocol summary
     $svcCompare = {
-        param($src, $dst)
+        param($src, $dst, $dstId)
         $diffs = @()
 
-        if ($src.display_name -ne $dst.display_name) {
-            $diffs += "display_name: '$($src.display_name)' → '$($dst.display_name)'"
+        # Skip display_name check when the ID was remapped by sanitization — the
+        # destination display_name is expected to differ (it was renamed to match the new ID).
+        if (-not $dstId -or $src.id -eq $dstId) {
+            if ($src.display_name -ne $dst.display_name) {
+                $diffs += "display_name: '$($src.display_name)' → '$($dst.display_name)'"
+            }
         }
 
         $srcEntries = @(Get-SafeProp $src 'service_entries')
@@ -583,11 +593,15 @@ function Compare-Services {
 
     # Service group compare: check display_name + member paths (order-insensitive)
     $sgCompare = {
-        param($src, $dst)
+        param($src, $dst, $dstId)
         $diffs = @()
 
-        if ($src.display_name -ne $dst.display_name) {
-            $diffs += "display_name: '$($src.display_name)' → '$($dst.display_name)'"
+        # Skip display_name check when the ID was remapped by sanitization — the
+        # destination display_name is expected to differ (it was renamed to match the new ID).
+        if (-not $dstId -or $src.id -eq $dstId) {
+            if ($src.display_name -ne $dst.display_name) {
+                $diffs += "display_name: '$($src.display_name)' → '$($dst.display_name)'"
+            }
         }
 
         $srcMembers = @(Get-SafeProp $src 'members' | ForEach-Object { $_.path } | Sort-Object)
