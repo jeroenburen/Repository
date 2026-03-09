@@ -106,7 +106,7 @@
         -OutputFolder C:\Reports\Migration -LogTarget Both
 
 .NOTES
-    Version : 1.2.3
+    Version : 1.2.4
     Changelog:
       1.0.0  Initial release.
       1.0.1  Fixed Build-Map: replaced $_ with $obj inside foreach loop ($_ is
@@ -142,6 +142,11 @@
              group mapping file is provided. The groups compareFunc now also
              accepts $dstId and skips the display_name check when the ID was
              remapped by the sanitization pipeline.
+      1.2.4  Fixed false MISMATCH on group PathExpression paths when a group
+             mapping file is provided. Source paths embed the old object ID in
+             the final path segment (e.g. /groups/securitygroup-223) while the
+             destination uses the renamed ID (e.g. /groups/Datacenter). Source
+             paths are now translated via $GroupIdMap before comparison.
 #>
 
 [CmdletBinding()]
@@ -153,7 +158,7 @@ param(
     [string]$LogFile         = '',
     [ValidateSet('Screen','File','Both')]
     [string]$LogTarget       = 'Screen',
-    [bool]$CompareIPSets     = $false,  # IP Sets are not part of the NSX DFW export and import process, so they are excluded from the comparison by default. Set to $true to include them.
+    [bool]$CompareIPSets     = $true,
     [bool]$CompareServices   = $true,
     [bool]$CompareGroups     = $true,
     [bool]$ComparePolicies   = $true,
@@ -161,7 +166,7 @@ param(
     [string]$ServiceMappingFile = ''
 )
 
-$ScriptVersion = '1.2.3'
+$ScriptVersion = '1.2.4'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -684,14 +689,24 @@ function Compare-Groups {
                         if ("$sv" -ne "$dv") { $diffs += "expr[$i].${f}: '$sv' → '$dv'" }
                     }
                 }
-                # For PathExpression compare paths (order-insensitive)
+                # For PathExpression compare paths (order-insensitive).
+                # Source paths may contain old IDs (e.g. /groups/securitygroup-223) while
+                # destination paths use the renamed IDs (e.g. /groups/Datacenter).
+                # Translate each source path via $GroupIdMap before comparing.
                 if ($se.resource_type -eq 'PathExpression') {
-                    $srcPaths = @(Get-SafeProp $se 'paths' | Sort-Object)
+                    $srcPaths = @(Get-SafeProp $se 'paths' | ForEach-Object {
+                        if ($_ -match '^(.*/)([^/]+)$') {
+                            $prefix    = $Matches[1]
+                            $segmentId = $Matches[2]
+                            $mappedId  = if ($GroupIdMap.ContainsKey($segmentId)) { $GroupIdMap[$segmentId] } else { $segmentId }
+                            "$prefix$mappedId"
+                        } else { $_ }
+                    } | Sort-Object)
                     $dstPaths = @(Get-SafeProp $de 'paths' | Sort-Object)
                     $added    = $dstPaths | Where-Object { $_ -notin $srcPaths }
                     $removed  = $srcPaths | Where-Object { $_ -notin $dstPaths }
-                    if ($added)   { $diffs += "expr[$i] paths added: $($added -join ', ')" }
-                    if ($removed) { $diffs += "expr[$i] paths missing: $($removed -join ', ')" }
+                    if ($added)   { $diffs += "expr[$i] paths added on dst: $($added -join ', ')" }
+                    if ($removed) { $diffs += "expr[$i] paths missing on dst: $($removed -join ', ')" }
                 }
             }
         }
