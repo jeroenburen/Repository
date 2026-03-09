@@ -1,4 +1,4 @@
-﻿# Version 1.6.0
+﻿# Version 1.7.0
 <#
 .SYNOPSIS
     STEP 2 of 2 — Imports NSX Distributed Firewall objects from CSV files into NSX 9.
@@ -10,8 +10,9 @@
       1. IP Sets
       2. Services (plain) and/or Service Groups — each independently controllable
       3. Security Groups
-      4. DFW Policies + Rules
-      5. VM Tags
+      4. Context Profiles
+      5. DFW Policies + Rules
+      6. VM Tags
 
     Services and Service Groups are imported in a single dependency-ordered pass
     when both flags are enabled, ensuring service groups are always created after
@@ -56,6 +57,12 @@
 
 .PARAMETER ImportGroups
     Import Security Groups. Default: $false
+
+.PARAMETER ImportProfiles
+    Import custom Context Profiles (NSX_Profiles.csv). Default: $false
+    Must be imported before policies and rules, as rules may reference profiles
+    by path. System-owned profiles are present on every NSX instance and do not
+    need to be imported.
 
 .PARAMETER ImportPolicies
     Import DFW Policies and Rules. Default: $false
@@ -111,6 +118,9 @@
              import work or NSX connectivity check begins. Each Import-* function
              now consumes the pre-resolved path variable instead of calling
              Resolve-CsvFile itself.
+      1.7.0  Added -ImportProfiles flag and Import-Profiles function to support
+             custom Context Profiles (NSX_Profiles.csv). Profiles are imported
+             after Security Groups and before DFW Policies + Rules.
 #>
 
 [CmdletBinding(SupportsShouldProcess)]
@@ -124,14 +134,15 @@ param(
     [bool]$ImportServices     = $false,
     [bool]$ImportServiceGroups = $false,
     [bool]$ImportGroups       = $false,
+    [bool]$ImportProfiles     = $false,
     [bool]$ImportPolicies     = $false,
     [bool]$ImportTags         = $false,
-    [string]$LogFile   = (Join-Path $InputFolder "Import-NSX-DFW_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"),
+    [string]$LogFile   = '',
     [ValidateSet('Screen','File','Both')]
-    [string]$LogTarget = 'Both'
+    [string]$LogTarget = 'Screen'
 )
 
-$ScriptVersion = '1.6.0'
+$ScriptVersion = '1.7.0'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -258,18 +269,20 @@ Write-Log "═══════════════════════
 Write-Log " FILE SELECTION — select all CSV files now" INFO
 Write-Log "════════════════════════════════════════════" INFO
 
-$Script:CsvPath_IPSets       = $null
-$Script:CsvPath_Services     = $null
+$Script:CsvPath_IPSets        = $null
+$Script:CsvPath_Services      = $null
 $Script:CsvPath_ServiceGroups = $null
-$Script:CsvPath_Groups       = $null
-$Script:CsvPath_Policies     = $null
-$Script:CsvPath_Rules        = $null
-$Script:CsvPath_Tags         = $null
+$Script:CsvPath_Groups        = $null
+$Script:CsvPath_Profiles      = $null
+$Script:CsvPath_Policies      = $null
+$Script:CsvPath_Rules         = $null
+$Script:CsvPath_Tags          = $null
 
 if ($ImportIPSets)        { $Script:CsvPath_IPSets        = Resolve-CsvFile -Label 'IP Sets'        }
 if ($ImportServices)      { $Script:CsvPath_Services      = Resolve-CsvFile -Label 'Services'        }
 if ($ImportServiceGroups) { $Script:CsvPath_ServiceGroups = Resolve-CsvFile -Label 'Service Groups'  }
 if ($ImportGroups)        { $Script:CsvPath_Groups        = Resolve-CsvFile -Label 'Security Groups' }
+if ($ImportProfiles)      { $Script:CsvPath_Profiles      = Resolve-CsvFile -Label 'Context Profiles'}
 if ($ImportPolicies) {
     $Script:CsvPath_Policies = Resolve-CsvFile -Label 'DFW Policies'
     $Script:CsvPath_Rules    = Resolve-CsvFile -Label 'DFW Rules'
@@ -298,8 +311,8 @@ function Invoke-NSXPatch {
         Invoke-RestMethod -Uri $uri -Method PATCH -Headers $Headers -Body $JsonBody | Out-Null
         return $true
     } catch {
-        $detail = $_.ErrorDetails.Message  # NSX error body often has the bad path here
-        Write-Log "PATCH $uri failed: $_ | Detail: $detail" ERROR
+        $detail = if ($_.ErrorDetails -and $_.ErrorDetails.Message) { " | Detail: $($_.ErrorDetails.Message)" } else { '' }
+        Write-Log "PATCH $uri failed: $_$detail" ERROR
         return $false
     }
 }
@@ -340,7 +353,7 @@ function Resolve-Conflict {
 # ─────────────────────────────────────────────────────────────
 # STATISTICS
 # ─────────────────────────────────────────────────────────────
-$Stats = @{ IPSets=0; Services=0; ServiceGroups=0; Groups=0; Policies=0; Rules=0; Tags=0; TagErrors=0; Skipped=0; Errors=0 }
+$Stats = @{ IPSets=0; Services=0; ServiceGroups=0; Groups=0; Profiles=0; Policies=0; Rules=0; Tags=0; TagErrors=0; Skipped=0; Errors=0 }
 
 # ═════════════════════════════════════════════════════════════
 # 1. IMPORT IP SETS
@@ -590,7 +603,32 @@ function Import-Groups {
 }
 
 # ═════════════════════════════════════════════════════════════
-# 4. IMPORT DFW POLICIES & RULES
+# 4. IMPORT CONTEXT PROFILES
+# ═════════════════════════════════════════════════════════════
+function Import-Profiles {
+    Write-Log "━━━ Importing Context Profiles ━━━" INFO
+    $csvPath = $Script:CsvPath_Profiles
+    $rows    = Read-CsvFile -ResolvedPath $csvPath -Label 'Context Profiles'
+    if (-not $rows) { return }
+
+    foreach ($row in $rows) {
+        $id   = $row.Id
+        $path = "/policy/api/v1/infra/context-profiles/$id"
+
+        if (Test-ObjectExists -Path $path) {
+            if (-not (Resolve-Conflict -ObjectType 'ContextProfile' -ObjectId $id)) { $Stats.Skipped++; continue }
+        }
+
+        if ($PSCmdlet.ShouldProcess($id, "Import Context Profile")) {
+            $ok = Invoke-NSXPatch -Path $path -JsonBody $row.RawJson
+            if ($ok) { $Stats.Profiles++; Write-Log "  ✔ Context Profile: $id ($($row.DisplayName))" SUCCESS }
+            else      { $Stats.Errors++ }
+        }
+    }
+}
+
+# ═════════════════════════════════════════════════════════════
+# 5. IMPORT DFW POLICIES & RULES
 # ═════════════════════════════════════════════════════════════
 function Import-Policies {
     Write-Log "━━━ Importing DFW Policies ━━━" INFO
@@ -645,7 +683,7 @@ function Import-Policies {
 }
 
 # ═════════════════════════════════════════════════════════════
-# 5. IMPORT VM TAGS
+# 6. IMPORT VM TAGS
 # ═════════════════════════════════════════════════════════════
 function Import-Tags {
     Write-Log "━━━ Importing VM Tags ━━━" INFO
@@ -698,7 +736,7 @@ function Import-Tags {
 # ═════════════════════════════════════════════════════════════
 # MAIN
 # ═════════════════════════════════════════════════════════════
-$anyAction = $ImportIPSets -or $ImportServices -or $ImportServiceGroups -or $ImportGroups -or $ImportPolicies -or $ImportTags
+$anyAction = $ImportIPSets -or $ImportServices -or $ImportServiceGroups -or $ImportGroups -or $ImportProfiles -or $ImportPolicies -or $ImportTags
 if (-not $anyAction) {
     Write-Log "No import actions selected. Specify at least one -Import* flag." WARN
     Write-Log "Example: -ImportPolicies `$true -ImportGroups `$true" WARN
@@ -716,6 +754,7 @@ Write-Log " Import IP Sets      : $ImportIPSets" INFO
 Write-Log " Import Services     : $ImportServices" INFO
 Write-Log " Import Svc Groups   : $ImportServiceGroups" INFO
 Write-Log " Import Groups       : $ImportGroups" INFO
+Write-Log " Import Profiles     : $ImportProfiles" INFO
 Write-Log " Import Policies     : $ImportPolicies" INFO
 Write-Log " Import Tags         : $ImportTags" INFO
 Write-Log " CSV files are selected upfront before import starts." INFO
@@ -730,6 +769,7 @@ try {
     if ($ImportIPSets)                            { Import-IPSets   }
     if ($ImportServices -or $ImportServiceGroups) { Import-Services }
     if ($ImportGroups)                            { Import-Groups   }
+    if ($ImportProfiles)                          { Import-Profiles }
     if ($ImportPolicies)                          { Import-Policies }
     if ($ImportTags)                              { Import-Tags     }
 
@@ -744,6 +784,7 @@ try {
     Write-Log "  Services imported       : $($Stats.Services)"      INFO
     Write-Log "  Svc Groups imported     : $($Stats.ServiceGroups)" INFO
     Write-Log "  Groups imported         : $($Stats.Groups)"        INFO
+    Write-Log "  Profiles imported       : $($Stats.Profiles)"      INFO
     Write-Log "  Policies imported       : $($Stats.Policies)"      INFO
     Write-Log "  Rules imported          : $($Stats.Rules)"         INFO
     Write-Log "  VMs tagged              : $($Stats.Tags)"          INFO
