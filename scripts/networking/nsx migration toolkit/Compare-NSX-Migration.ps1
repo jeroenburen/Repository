@@ -109,7 +109,7 @@
         -OutputFolder C:\Reports\Migration -LogTarget Both
 
 .NOTES
-    Version : 1.3.3
+    Version : 1.3.4
     Changelog:
       1.0.0  Initial release.
       1.0.1  Fixed Build-Map: replaced $_ with $obj inside foreach loop ($_ is
@@ -179,6 +179,12 @@
              that unpacks NestedExpression entries without calling any function.
              Also replaced Get-SafeProp calls inside the scriptblock with direct
              PSObject.Properties checks to avoid scope resolution issues.
+      1.3.4  Fixed $GroupIdMap being $null inside the groups compareFunc scriptblock.
+             When a scriptblock is invoked with & from a different function scope,
+             it does not inherit the caller's variables. Fixed by calling
+             .GetNewClosure() on the scriptblock before passing it to
+             Compare-ObjectSets, which captures $GroupIdMap from the defining
+             scope at the time Compare-Groups runs.
 #>
 
 [CmdletBinding()]
@@ -199,7 +205,7 @@ param(
     [string]$ServiceMappingFile = ''
 )
 
-$ScriptVersion = '1.3.3'
+$ScriptVersion = '1.3.4'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -781,7 +787,7 @@ function Compare-Groups {
         return @{ Equal=$false; Detail=($diffs -join ' | ') }
     }
 
-    $c = Compare-ObjectSets -TypeLabel 'Group' -SrcMap $srcMap -DstMap $dstMap -CompareFunc $compareFunc -IdMap $GroupIdMap
+    $c = Compare-ObjectSets -TypeLabel 'Group' -SrcMap $srcMap -DstMap $dstMap -CompareFunc $compareFunc.GetNewClosure() -IdMap $GroupIdMap
     $Stats.Groups_Match      += $c.Match
     $Stats.Groups_Mismatch   += $c.Mismatch
     $Stats.Groups_MissingDst += $c.MissingDst
