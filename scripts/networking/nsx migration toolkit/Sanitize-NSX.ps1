@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # Sanitize-NSX.ps1  —  Orchestrator
-# Version 1.3.0
+# Version 1.4.0
 #
 # PURPOSE
 # -------
@@ -71,12 +71,20 @@
 #
 #   - Values of "ANY" and empty fields are left untouched in both files.
 #
+# Step 4 — Inline profiles sanitization (no separate script needed)
+#   - When -ProfilesFile is provided, reads the Context Profiles CSV and
+#     removes migration-artefact tags from both the Tags CSV column and the
+#     "tags" array inside RawJson. No ID remapping is performed — profile
+#     Ids are already clean human-readable names.
+#   - Writes <ProfilesFile>_sanitized.csv.
+#
 # OUTPUTS
 # -------
 #   <GroupsFile>_sanitized.csv    — groups with corrected Ids and RawJson
 #   <ServicesFile>_sanitized.csv  — services/service groups with corrected Ids
-#   <RulesFile>_sanitized.csv     — rules with updated group path references
+#   <RulesFile>_sanitized.csv     — rules with updated group/service path references
 #   <PoliciesFile>_sanitized.csv  — policies with updated group path references
+#   <ProfilesFile>_sanitized.csv  — profiles with tags removed
 #   <GroupsFile>_id_mapping.csv   — audit log of every group oldId -> newId rename
 #   <ServicesFile>_id_mapping.csv — audit log of every service oldId -> newId rename
 #
@@ -84,15 +92,18 @@
 # -----
 #   # Typical usage — all output paths are auto-derived:
 #   .\Sanitize-NSX.ps1 -GroupsFile "groups.csv" -ServicesFile "services.csv" `
-#                      -RulesFile  "rules.csv"   -PoliciesFile "policies.csv"
+#                      -RulesFile  "rules.csv"   -PoliciesFile "policies.csv" `
+#                      -ProfilesFile "profiles.csv"
 #
 #   # With explicit output paths:
 #   .\Sanitize-NSX.ps1 -GroupsFile    "groups.csv"    -ServicesFile    "services.csv"  `
 #                      -RulesFile     "rules.csv"      -PoliciesFile    "policies.csv"  `
+#                      -ProfilesFile  "profiles.csv"                                    `
 #                      -GroupsOut     "groups_clean.csv"                                `
 #                      -ServicesOut   "services_clean.csv"                              `
 #                      -RulesOut      "rules_clean.csv"                                 `
 #                      -PoliciesOut   "policies_clean.csv"                              `
+#                      -ProfilesOut   "profiles_clean.csv"                              `
 #                      -GroupMappingOut   "groups_rename_log.csv"                       `
 #                      -ServiceMappingOut "services_rename_log.csv"
 #
@@ -125,10 +136,15 @@ param(
     # alongside the rules CSV using the same group ID mapping.
     [string]$PoliciesFile,
 
+    # Optional — when provided, the profiles CSV is sanitized in Step 4
+    # (tags are removed; no ID remapping is needed for profiles).
+    [string]$ProfilesFile,
+
     [string]$GroupsOut   = ($GroupsFile -replace '\.csv$', '_sanitized.csv'),
     [string]$ServicesOut = '',   # auto-derived below if ServicesFile is provided
     [string]$RulesOut    = ($RulesFile  -replace '\.csv$', '_sanitized.csv'),
     [string]$PoliciesOut = '',   # auto-derived below if PoliciesFile is provided
+    [string]$ProfilesOut = '',   # auto-derived below if ProfilesFile is provided
 
     # Separate mapping output paths for groups and services
     [string]$GroupMappingOut   = ($GroupsFile -replace '\.csv$', '_id_mapping.csv'),
@@ -148,6 +164,9 @@ if ($ServicesFile -and -not $ServiceMappingOut) {
 }
 if ($PoliciesFile -and -not $PoliciesOut) {
     $PoliciesOut = $PoliciesFile -replace '\.csv$', '_sanitized.csv'
+}
+if ($ProfilesFile -and -not $ProfilesOut) {
+    $ProfilesOut = $ProfilesFile -replace '\.csv$', '_sanitized.csv'
 }
 
 # Honor legacy -MappingOut override for backward compatibility
@@ -172,6 +191,11 @@ if ($ServicesFile -and -not (Test-Path $ServicesFile)) {
 
 if ($PoliciesFile -and -not (Test-Path $PoliciesFile)) {
     Write-Error "Input file not found: $PoliciesFile"
+    exit 1
+}
+
+if ($ProfilesFile -and -not (Test-Path $ProfilesFile)) {
+    Write-Error "Input file not found: $ProfilesFile"
     exit 1
 }
 
@@ -241,10 +265,10 @@ if ($ServicesFile) {
 # the rules/policies script silently skips it when omitted.
 # ---------------------------------------------------------------------------
 $ruleStepNumber = if ($ServicesFile) { 3 } else { 2 }
-$ruleTotalSteps = if ($ServicesFile) { 3 } else { 2 }
+$totalSteps     = $ruleStepNumber + $(if ($ProfilesFile) { 1 } else { 0 })
 
 Write-Host ""
-Write-Host "Step $ruleStepNumber/$ruleTotalSteps — Sanitizing firewall rules and policies..." -ForegroundColor Magenta
+Write-Host "Step $ruleStepNumber/$totalSteps — Sanitizing firewall rules and policies..." -ForegroundColor Magenta
 
 $step3Params = @{
     RulesFile    = $RulesFile
@@ -259,6 +283,34 @@ if ($PoliciesFile) {
 }
 
 & "$scriptDir\Sanitize-NSXFirewallRules.ps1" @step3Params
+
+# ---------------------------------------------------------------------------
+# Step 4 — Sanitize Context Profiles (optional)
+#
+# Profile IDs are already clean — no renaming needed. We only strip tags,
+# which are migration artefacts with no meaning in the destination environment.
+# ---------------------------------------------------------------------------
+if ($ProfilesFile) {
+    $profileStepNumber = $ruleStepNumber + 1
+    Write-Host ""
+    Write-Host "Step $profileStepNumber/$totalSteps — Sanitizing Context Profiles..." -ForegroundColor Magenta
+    Write-Host "  [Profiles] Reading: $ProfilesFile" -ForegroundColor Cyan
+
+    $profileRows    = Import-Csv -Path $ProfilesFile
+    $profilesUpdated = 0
+
+    foreach ($row in $profileRows) {
+        $before      = $row.RawJson
+        # Strip the "tags" array from RawJson — same regex used throughout the toolkit.
+        $row.RawJson = [regex]::Replace($row.RawJson, '"tags":\[.*?\]', '"tags":[]')
+        $row.Tags    = ''
+        if ($row.RawJson -ne $before) { $profilesUpdated++ }
+    }
+
+    Write-Host "  [Profiles] Writing: $ProfilesOut" -ForegroundColor Cyan
+    $profileRows | Export-Csv -Path $ProfilesOut -NoTypeInformation -Encoding UTF8
+    Write-Host "  [Profiles] $profilesUpdated profile row(s) had tags removed." -ForegroundColor Yellow
+}
 
 # ---------------------------------------------------------------------------
 # Summary
@@ -276,6 +328,9 @@ if ($ServicesFile) {
 Write-Host "  Rules  (sanitized)   : $RulesOut"
 if ($PoliciesFile) {
     Write-Host "  Policies (sanitized) : $PoliciesOut"
+}
+if ($ProfilesFile) {
+    Write-Host "  Profiles (sanitized) : $ProfilesOut"
 }
 Write-Host ""
 
