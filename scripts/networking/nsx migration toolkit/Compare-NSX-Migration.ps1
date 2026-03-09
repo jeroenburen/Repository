@@ -109,7 +109,7 @@
         -OutputFolder C:\Reports\Migration -LogTarget Both
 
 .NOTES
-    Version : 1.4.4
+    Version : 1.4.6
     Changelog:
       1.0.0  Initial release.
       1.0.1  Fixed Build-Map: replaced $_ with $obj inside foreach loop ($_ is
@@ -220,7 +220,7 @@ param(
     [string]$ServiceMappingFile = ''
 )
 
-$ScriptVersion = '1.4.4'
+$ScriptVersion = '1.4.6'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -616,24 +616,30 @@ function Compare-Services {
         if ($srcEntries.Count -ne $dstEntries.Count) {
             $diffs += "service_entries count: $($srcEntries.Count) → $($dstEntries.Count)"
         } else {
-            # Build a canonical sort key for a service entry so that entry order
-            # differences between source and destination do not cause false mismatches.
-            function Get-EntryKey {
-                param($entry)
-                $rt    = if ($entry.PSObject.Properties['resource_type']) { $entry.resource_type } else { '' }
-                $proto = if ($entry.PSObject.Properties['l4_protocol']) { $entry.l4_protocol } else { '' }
-                $dportRaw = if ($entry.PSObject.Properties['destination_ports'] -and $null -ne $entry.destination_ports) { $entry.destination_ports } else { $null }
+            # Sort both entry lists by a canonical key so entry order differences
+            # between source and destination do not cause false mismatches.
+            $srcSorted = @($srcEntries | Sort-Object {
+                $rt = if ($_.PSObject.Properties['resource_type']) { $_.resource_type } else { '' }
+                $proto = if ($_.PSObject.Properties['l4_protocol']) { $_.l4_protocol } else { '' }
+                $dportRaw = if ($_.PSObject.Properties['destination_ports'] -and $null -ne $_.destination_ports) { $_.destination_ports } else { $null }
                 $dport = if ($dportRaw -is [array]) { ($dportRaw | Sort-Object) -join ',' } else { "$dportRaw" }
-                $sportRaw = if ($entry.PSObject.Properties['source_ports'] -and $null -ne $entry.source_ports) { $entry.source_ports } else { $null }
+                $sportRaw = if ($_.PSObject.Properties['source_ports'] -and $null -ne $_.source_ports) { $_.source_ports } else { $null }
                 $sport = if ($sportRaw -is [array]) { ($sportRaw | Sort-Object) -join ',' } else { "$sportRaw" }
-                $icmp  = if ($entry.PSObject.Properties['icmp_type']) { $entry.icmp_type } else { '' }
-                $pnum  = if ($entry.PSObject.Properties['protocol_number']) { $entry.protocol_number } else { '' }
-                return "$rt|$proto|$dport|$sport|$icmp|$pnum"
-            }
-
-            # Sort both entry lists by their canonical key before comparing
-            $srcSorted = @($srcEntries | Sort-Object { Get-EntryKey $_ })
-            $dstSorted = @($dstEntries | Sort-Object { Get-EntryKey $_ })
+                $icmp = if ($_.PSObject.Properties['icmp_type']) { $_.icmp_type } else { '' }
+                $pnum = if ($_.PSObject.Properties['protocol_number']) { $_.protocol_number } else { '' }
+                "$rt|$proto|$dport|$sport|$icmp|$pnum"
+            })
+            $dstSorted = @($dstEntries | Sort-Object {
+                $rt = if ($_.PSObject.Properties['resource_type']) { $_.resource_type } else { '' }
+                $proto = if ($_.PSObject.Properties['l4_protocol']) { $_.l4_protocol } else { '' }
+                $dportRaw = if ($_.PSObject.Properties['destination_ports'] -and $null -ne $_.destination_ports) { $_.destination_ports } else { $null }
+                $dport = if ($dportRaw -is [array]) { ($dportRaw | Sort-Object) -join ',' } else { "$dportRaw" }
+                $sportRaw = if ($_.PSObject.Properties['source_ports'] -and $null -ne $_.source_ports) { $_.source_ports } else { $null }
+                $sport = if ($sportRaw -is [array]) { ($sportRaw | Sort-Object) -join ',' } else { "$sportRaw" }
+                $icmp = if ($_.PSObject.Properties['icmp_type']) { $_.icmp_type } else { '' }
+                $pnum = if ($_.PSObject.Properties['protocol_number']) { $_.protocol_number } else { '' }
+                "$rt|$proto|$dport|$sport|$icmp|$pnum"
+            })
 
             for ($i = 0; $i -lt $srcSorted.Count; $i++) {
                 $se = $srcSorted[$i]; $de = $dstSorted[$i]
@@ -785,18 +791,18 @@ function Compare-Groups {
 
         # --- Flatten all Conditions from source and destination ---
         $srcConditions = @($srcLeaves | Where-Object { $null -ne $_ -and $_.PSObject.Properties['resource_type'] -and $_.resource_type -eq 'Condition' } | ForEach-Object {
-            $mt = if ($_.PSObject.Properties['member_type']) { $_.member_type } else { '' }
-            $k  = if ($_.PSObject.Properties['key'])         { $_.key         } else { '' }
-            $op = if ($_.PSObject.Properties['operator'])    { $_.operator    } else { '' }
-            $v  = if ($_.PSObject.Properties['value'])       { $_.value       } else { '' }
+            $mt = if ($_.PSObject.Properties['member_type']) { $_.member_type.ToUpper() } else { '' }
+            $k  = if ($_.PSObject.Properties['key'])         { $_.key.ToUpper()         } else { '' }
+            $op = if ($_.PSObject.Properties['operator'])    { $_.operator.ToUpper()    } else { '' }
+            $v  = if ($_.PSObject.Properties['value'])       { $_.value                 } else { '' }
             "$mt|$k|$op|$v"
         } | Sort-Object)
 
         $dstConditions = @($dstLeaves | Where-Object { $null -ne $_ -and $_.PSObject.Properties['resource_type'] -and $_.resource_type -eq 'Condition' } | ForEach-Object {
-            $mt = if ($_.PSObject.Properties['member_type']) { $_.member_type } else { '' }
-            $k  = if ($_.PSObject.Properties['key'])         { $_.key         } else { '' }
-            $op = if ($_.PSObject.Properties['operator'])    { $_.operator    } else { '' }
-            $v  = if ($_.PSObject.Properties['value'])       { $_.value       } else { '' }
+            $mt = if ($_.PSObject.Properties['member_type']) { $_.member_type.ToUpper() } else { '' }
+            $k  = if ($_.PSObject.Properties['key'])         { $_.key.ToUpper()         } else { '' }
+            $op = if ($_.PSObject.Properties['operator'])    { $_.operator.ToUpper()    } else { '' }
+            $v  = if ($_.PSObject.Properties['value'])       { $_.value                 } else { '' }
             "$mt|$k|$op|$v"
         } | Sort-Object)
 
