@@ -81,6 +81,14 @@
 .PARAMETER ComparePolicies
     Validate DFW Policies and Rules. Default: $true
 
+.PARAMETER GroupReviewList
+    Comma-separated list of source group IDs whose MISMATCH result should be
+    downgraded to REVIEW in the report. Use for groups that are logically
+    equivalent but structurally different in a way the script cannot resolve
+    (e.g. same conditions split across different criteria blocks). REVIEW rows
+    are visible in the report but do not count as mismatches and do not affect
+    the overall PASSED/ISSUES FOUND status.
+
 .PARAMETER GroupMappingFile
     Path to the groups ID mapping CSV produced by Sanitize-NSX.ps1
     (typically named NSX_Groups_id_mapping.csv). Must contain OldId and NewId
@@ -109,7 +117,7 @@
         -OutputFolder C:\Reports\Migration -LogTarget Both
 
 .NOTES
-    Version : 1.4.6
+    Version : 1.5.0
     Changelog:
       1.0.0  Initial release.
       1.0.1  Fixed Build-Map: replaced $_ with $obj inside foreach loop ($_ is
@@ -216,11 +224,12 @@ param(
     [bool]$CompareGroups     = $true,
     [bool]$ComparePolicies   = $true,
     [bool]$CompareProfiles   = $true,
-    [string]$GroupMappingFile   = '',
-    [string]$ServiceMappingFile = ''
+    [string]$GroupMappingFile      = '',
+    [string]$ServiceMappingFile    = '',
+    [string]$GroupReviewList       = ''
 )
 
-$ScriptVersion = '1.4.6'
+$ScriptVersion = '1.5.0'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -265,6 +274,16 @@ function Load-MappingFile {
 
 if ($GroupMappingFile)   { $GroupIdMap   = Load-MappingFile -FilePath $GroupMappingFile   -Label 'Groups'   }
 if ($ServiceMappingFile) { $ServiceIdMap = Load-MappingFile -FilePath $ServiceMappingFile -Label 'Services' }
+
+# Build review set from comma-separated list — keys are source group IDs
+$GroupReviewSet = @{}
+if ($GroupReviewList) {
+    foreach ($entry in ($GroupReviewList -split ',')) {
+        $trimmed = $entry.Trim()
+        if ($trimmed) { $GroupReviewSet[$trimmed] = $true }
+    }
+    Write-Log " Group review list: $($GroupReviewSet.Count) group(s) will be downgraded from MISMATCH to REVIEW" INFO
+}
 
 # Translates a source object ID to its (potentially renamed) destination ID.
 # Returns the mapped ID if one exists, otherwise returns the original.
@@ -422,7 +441,7 @@ $Stats = @{
     IPSets_Match       = 0; IPSets_Mismatch   = 0; IPSets_MissingDst  = 0; IPSets_MissingSrc  = 0
     Services_Match     = 0; Services_Mismatch = 0; Services_MissingDst= 0; Services_MissingSrc= 0
     SvcGroups_Match    = 0; SvcGroups_Mismatch= 0; SvcGroups_MissingDst=0; SvcGroups_MissingSrc=0
-    Groups_Match       = 0; Groups_Mismatch   = 0; Groups_MissingDst  = 0; Groups_MissingSrc  = 0
+    Groups_Match       = 0; Groups_Mismatch   = 0; Groups_MissingDst  = 0; Groups_MissingSrc  = 0; Groups_Review = 0
     Policies_Match     = 0; Policies_Mismatch = 0; Policies_MissingDst= 0; Policies_MissingSrc= 0
     Rules_Match        = 0; Rules_Mismatch    = 0; Rules_MissingDst   = 0; Rules_MissingSrc   = 0
     Profiles_Match     = 0; Profiles_Mismatch = 0; Profiles_MissingDst= 0; Profiles_MissingSrc= 0
@@ -438,7 +457,7 @@ function Add-Finding {
         [string]$ObjectType,
         [string]$ObjectId,
         [string]$DisplayName,
-        [ValidateSet('MATCH','MISMATCH','MISSING_DST','MISSING_SRC')][string]$Result,
+        [ValidateSet('MATCH','MISMATCH','MISSING_DST','MISSING_SRC','REVIEW')][string]$Result,
         [string]$Detail = ''
     )
     $Findings.Add([PSCustomObject]@{
@@ -462,10 +481,11 @@ function Compare-ObjectSets {
         [hashtable] $SrcMap,       # id -> object
         [hashtable] $DstMap,       # id -> object
         [scriptblock]$CompareFunc, # ($src,$dst) -> @{Equal=$bool; Detail='...'}
-        [hashtable] $IdMap = @{}   # source oldId -> destination newId (from mapping file)
+        [hashtable] $IdMap = @{},  # source oldId -> destination newId (from mapping file)
+        [hashtable] $ReviewSet = @{} # source IDs whose MISMATCH should be downgraded to REVIEW
     )
 
-    $counts = @{ Match=0; Mismatch=0; MissingDst=0; MissingSrc=0 }
+    $counts = @{ Match=0; Mismatch=0; MissingDst=0; MissingSrc=0; Review=0 }
 
     # Objects present in source — check if they reached the destination
     foreach ($id in $SrcMap.Keys) {
@@ -481,6 +501,10 @@ function Compare-ObjectSets {
                 Write-Log "  ✔ MATCH        [$TypeLabel] $id ($name)$idNote" SUCCESS
                 Add-Finding -ObjectType $TypeLabel -ObjectId $id -DisplayName $name -Result 'MATCH' -Detail $idNote.Trim()
                 $counts.Match++
+            } elseif ($ReviewSet.ContainsKey($id)) {
+                Write-Log "  ~ REVIEW       [$TypeLabel] $id ($name)$idNote — $($result.Detail)" WARN
+                Add-Finding -ObjectType $TypeLabel -ObjectId $id -DisplayName $name -Result 'REVIEW' -Detail ('Manually reviewed — ' + $idNote.Trim() + $(if ($idNote) {' | '} else {''}) + $result.Detail)
+                $counts.Review++
             } else {
                 Write-Log "  ⚠ MISMATCH     [$TypeLabel] $id ($name)$idNote — $($result.Detail)" WARN
                 Add-Finding -ObjectType $TypeLabel -ObjectId $id -DisplayName $name -Result 'MISMATCH' -Detail ($idNote.Trim() + $(if ($idNote) {' | '} else {''}) + $result.Detail)
@@ -815,12 +839,13 @@ function Compare-Groups {
         return @{ Equal=$false; Detail=($diffs -join ' | ') }
     }
 
-    $c = Compare-ObjectSets -TypeLabel 'Group' -SrcMap $srcMap -DstMap $dstMap -CompareFunc $compareFunc.GetNewClosure() -IdMap $GroupIdMap
+    $c = Compare-ObjectSets -TypeLabel 'Group' -SrcMap $srcMap -DstMap $dstMap -CompareFunc $compareFunc.GetNewClosure() -IdMap $GroupIdMap -ReviewSet $GroupReviewSet
     $Stats.Groups_Match      += $c.Match
     $Stats.Groups_Mismatch   += $c.Mismatch
     $Stats.Groups_MissingDst += $c.MissingDst
     $Stats.Groups_MissingSrc += $c.MissingSrc
-    Write-Log "  Security Groups result: $($c.Match) match | $($c.Mismatch) mismatch | $($c.MissingDst) missing on dst | $($c.MissingSrc) extra on dst" INFO
+    $Stats.Groups_Review     += $c.Review
+    Write-Log "  Security Groups result: $($c.Match) match | $($c.Mismatch) mismatch | $($c.MissingDst) missing on dst | $($c.MissingSrc) extra on dst | $($c.Review) review" INFO
 }
 
 # ═════════════════════════════════════════════════════════════
@@ -982,6 +1007,7 @@ function Get-ResultBadge {
         'MISMATCH'    { return '<span class="badge mismatch">⚠ MISMATCH</span>' }
         'MISSING_DST' { return '<span class="badge missing-dst">✗ MISSING ON DST</span>' }
         'MISSING_SRC' { return '<span class="badge missing-src">✗ EXTRA ON DST</span>' }
+        'REVIEW'      { return '<span class="badge review">~ REVIEW</span>' }
         default       { return "<span class='badge'>$Result</span>" }
     }
 }
@@ -1006,6 +1032,7 @@ function Export-HtmlReport {
             'MISMATCH'    { 'row-mismatch' }
             'MISSING_DST' { 'row-missing-dst' }
             'MISSING_SRC' { 'row-missing-src' }
+            'REVIEW'      { 'row-review' }
         }
         $detail = [System.Web.HttpUtility]::HtmlEncode($finding.Detail)
         "<tr class='$rowClass'><td>$([System.Web.HttpUtility]::HtmlEncode($finding.ObjectType))</td><td><code>$([System.Web.HttpUtility]::HtmlEncode($finding.ObjectId))</code></td><td>$([System.Web.HttpUtility]::HtmlEncode($finding.DisplayName))</td><td>$badge</td><td class='detail'>$detail</td></tr>"
@@ -1171,6 +1198,7 @@ Write-Log " Output folder   : $OutputFolder" INFO
 Write-Log " Log file        : $LogFile" INFO
 Write-Log " Group mapping   : $(if ($GroupMappingFile)   { $GroupMappingFile   } else { '(none — IDs assumed unchanged)' })" INFO
 Write-Log " Service mapping : $(if ($ServiceMappingFile) { $ServiceMappingFile } else { '(none — IDs assumed unchanged)' })" INFO
+Write-Log " Review list     : $(if ($GroupReviewList) { "$($GroupReviewSet.Count) group(s): $($GroupReviewSet.Keys -join ', ')" } else { '(none)' })" INFO
 Write-Log "════════════════════════════════════════════════════════════════════" INFO
 Write-Log " NOTE: System-owned objects are EXCLUDED from all comparisons." INFO
 Write-Log "════════════════════════════════════════════════════════════════════" INFO
@@ -1208,23 +1236,23 @@ try {
     $totalMismatch   = ($Stats.IPSets_Mismatch + $Stats.Services_Mismatch + $Stats.SvcGroups_Mismatch + $Stats.Groups_Mismatch + $Stats.Profiles_Mismatch + $Stats.Policies_Mismatch + $Stats.Rules_Mismatch)
     $totalMissingDst = ($Stats.IPSets_MissingDst + $Stats.Services_MissingDst + $Stats.SvcGroups_MissingDst + $Stats.Groups_MissingDst + $Stats.Profiles_MissingDst + $Stats.Policies_MissingDst + $Stats.Rules_MissingDst)
     $totalMissingSrc = ($Stats.IPSets_MissingSrc + $Stats.Services_MissingSrc + $Stats.SvcGroups_MissingSrc + $Stats.Groups_MissingSrc + $Stats.Profiles_MissingSrc + $Stats.Policies_MissingSrc + $Stats.Rules_MissingSrc)
-    $overallStatus   = if ($totalMismatch -eq 0 -and $totalMissingDst -eq 0) { 'PASSED ✔' } else { 'ISSUES FOUND ⚠' }
+    $overallStatus   = if ($totalMismatch -eq 0 -and $totalMissingDst -eq 0) { if ($Stats.Groups_Review -gt 0) { 'PASSED WITH REVIEWS ✔' } else { 'PASSED ✔' } } else { 'ISSUES FOUND ⚠' }
 
     Write-Log "" INFO
     Write-Log "════════════════════════════════════════════════════════════════════" INFO
     Write-Log " VALIDATION SUMMARY" INFO
     Write-Log "────────────────────────────────────────────────────────────────────" INFO
-    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10}" -f 'Object Type','Match','Mismatch','Missing Dst','Extra Dst') INFO
+    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10} {5,8}" -f 'Object Type','Match','Mismatch','Missing Dst','Extra Dst','Review') INFO
     Write-Log "  ─────────────────────────────────────────────────────────────────" INFO
-    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10}" -f 'IP Sets',$Stats.IPSets_Match,$Stats.IPSets_Mismatch,$Stats.IPSets_MissingDst,$Stats.IPSets_MissingSrc) INFO
-    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10}" -f 'Services',$Stats.Services_Match,$Stats.Services_Mismatch,$Stats.Services_MissingDst,$Stats.Services_MissingSrc) INFO
-    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10}" -f 'Service Groups',$Stats.SvcGroups_Match,$Stats.SvcGroups_Mismatch,$Stats.SvcGroups_MissingDst,$Stats.SvcGroups_MissingSrc) INFO
-    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10}" -f 'Security Groups',$Stats.Groups_Match,$Stats.Groups_Mismatch,$Stats.Groups_MissingDst,$Stats.Groups_MissingSrc) INFO
-    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10}" -f 'Context Profiles',$Stats.Profiles_Match,$Stats.Profiles_Mismatch,$Stats.Profiles_MissingDst,$Stats.Profiles_MissingSrc) INFO
-    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10}" -f 'DFW Policies',$Stats.Policies_Match,$Stats.Policies_Mismatch,$Stats.Policies_MissingDst,$Stats.Policies_MissingSrc) INFO
-    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10}" -f 'DFW Rules',$Stats.Rules_Match,$Stats.Rules_Mismatch,$Stats.Rules_MissingDst,$Stats.Rules_MissingSrc) INFO
+    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10} {5,8}" -f 'IP Sets',$Stats.IPSets_Match,$Stats.IPSets_Mismatch,$Stats.IPSets_MissingDst,$Stats.IPSets_MissingSrc,0) INFO
+    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10} {5,8}" -f 'Services',$Stats.Services_Match,$Stats.Services_Mismatch,$Stats.Services_MissingDst,$Stats.Services_MissingSrc,0) INFO
+    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10} {5,8}" -f 'Service Groups',$Stats.SvcGroups_Match,$Stats.SvcGroups_Mismatch,$Stats.SvcGroups_MissingDst,$Stats.SvcGroups_MissingSrc,0) INFO
+    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10} {5,8}" -f 'Security Groups',$Stats.Groups_Match,$Stats.Groups_Mismatch,$Stats.Groups_MissingDst,$Stats.Groups_MissingSrc,$Stats.Groups_Review) INFO
+    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10} {5,8}" -f 'Context Profiles',$Stats.Profiles_Match,$Stats.Profiles_Mismatch,$Stats.Profiles_MissingDst,$Stats.Profiles_MissingSrc,0) INFO
+    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10} {5,8}" -f 'DFW Policies',$Stats.Policies_Match,$Stats.Policies_Mismatch,$Stats.Policies_MissingDst,$Stats.Policies_MissingSrc,0) INFO
+    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10} {5,8}" -f 'DFW Rules',$Stats.Rules_Match,$Stats.Rules_Mismatch,$Stats.Rules_MissingDst,$Stats.Rules_MissingSrc,0) INFO
     Write-Log "  ─────────────────────────────────────────────────────────────────" INFO
-    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10}" -f 'TOTAL',$totalMatch,$totalMismatch,$totalMissingDst,$totalMissingSrc) INFO
+    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10} {5,8}" -f 'TOTAL',$totalMatch,$totalMismatch,$totalMissingDst,$totalMissingSrc,$Stats.Groups_Review) INFO
     Write-Log "════════════════════════════════════════════════════════════════════" INFO
     Write-Log " Overall status : $overallStatus" INFO
     Write-Log "════════════════════════════════════════════════════════════════════" INFO
