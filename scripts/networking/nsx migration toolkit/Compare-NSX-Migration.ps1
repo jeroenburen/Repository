@@ -109,7 +109,7 @@
         -OutputFolder C:\Reports\Migration -LogTarget Both
 
 .NOTES
-    Version : 1.3.2
+    Version : 1.3.3
     Changelog:
       1.0.0  Initial release.
       1.0.1  Fixed Build-Map: replaced $_ with $obj inside foreach loop ($_ is
@@ -173,6 +173,12 @@
              recursive Get-LeafExpressions helper that unpacks NestedExpression
              blocks at any depth before collecting Conditions and PathExpression
              paths, so the structural grouping of expressions is fully ignored.
+      1.3.3  Fixed Get-LeafExpressions silently not executing — PowerShell does
+             not support function definitions inside scriptblocks. Replaced with
+             an iterative stack-based approach directly inside the scriptblock
+             that unpacks NestedExpression entries without calling any function.
+             Also replaced Get-SafeProp calls inside the scriptblock with direct
+             PSObject.Properties checks to avoid scope resolution issues.
 #>
 
 [CmdletBinding()]
@@ -183,7 +189,7 @@ param(
     [string]$OutputFolder    = ".\NSX_Validation_$(Get-Date -Format 'yyyyMMdd_HHmmss')",
     [string]$LogFile         = '',
     [ValidateSet('Screen','File','Both')]
-    [string]$LogTarget       = 'Both',
+    [string]$LogTarget       = 'Screen',
     [bool]$CompareIPSets     = $false,
     [bool]$CompareServices   = $true,
     [bool]$CompareGroups     = $true,
@@ -193,7 +199,7 @@ param(
     [string]$ServiceMappingFile = ''
 )
 
-$ScriptVersion = '1.3.2'
+$ScriptVersion = '1.3.3'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -699,39 +705,40 @@ function Compare-Groups {
             }
         }
 
-        # Compare expressions using a flattened, type-bucketed approach.
-        # ConjunctionOperator entries are ignored — NSX auto-generates them.
-        # NestedExpression blocks are recursively unpacked so that conditions or
-        # paths inside them are treated the same as top-level ones. This means
-        # splitting one criteria block into two (or nesting it) does not cause
-        # a false mismatch — only the total set of paths/conditions matters.
-
-        # Helper: recursively collect all leaf expression entries from a list,
-        # unpacking NestedExpression blocks and skipping ConjunctionOperators.
-        function Get-LeafExpressions {
-            param([object[]]$Exprs)
-            $leaves = [System.Collections.Generic.List[object]]::new()
-            foreach ($e in $Exprs) {
-                $rt = Get-SafeProp $e 'resource_type'
-                if ($rt -eq 'ConjunctionOperator') { continue }
-                if ($rt -eq 'NestedExpression') {
-                    $inner = @(Get-SafeProp $e 'expressions')
-                    if ($inner) {
-                        foreach ($leaf in (Get-LeafExpressions -Exprs $inner)) { $leaves.Add($leaf) }
-                    }
-                } else {
-                    $leaves.Add($e)
-                }
-            }
-            return $leaves.ToArray()
+        # Flatten all leaf expressions from a group's expression tree using an
+        # iterative stack — no nested functions (unsupported in scriptblocks).
+        # ConjunctionOperator entries are skipped; NestedExpression blocks are
+        # unpacked by pushing their inner expressions onto the stack.
+        # This means conditions/paths split across any structure compare equally.
+        $srcLeaves = [System.Collections.Generic.List[object]]::new()
+        $stack = [System.Collections.Generic.Stack[object]]::new()
+        foreach ($e in @(Get-SafeProp $src 'expression')) { $stack.Push($e) }
+        while ($stack.Count -gt 0) {
+            $e  = $stack.Pop()
+            $rt = if ($e.PSObject.Properties['resource_type']) { $e.resource_type } else { '' }
+            if ($rt -eq 'ConjunctionOperator') { continue }
+            if ($rt -eq 'NestedExpression') {
+                $inner = if ($e.PSObject.Properties['expressions']) { @($e.expressions) } else { @() }
+                foreach ($ie in $inner) { $stack.Push($ie) }
+            } else { $srcLeaves.Add($e) }
         }
 
-        $srcLeaves = @(Get-LeafExpressions -Exprs @(Get-SafeProp $src 'expression'))
-        $dstLeaves = @(Get-LeafExpressions -Exprs @(Get-SafeProp $dst 'expression'))
+        $dstLeaves = [System.Collections.Generic.List[object]]::new()
+        $stack = [System.Collections.Generic.Stack[object]]::new()
+        foreach ($e in @(Get-SafeProp $dst 'expression')) { $stack.Push($e) }
+        while ($stack.Count -gt 0) {
+            $e  = $stack.Pop()
+            $rt = if ($e.PSObject.Properties['resource_type']) { $e.resource_type } else { '' }
+            if ($rt -eq 'ConjunctionOperator') { continue }
+            if ($rt -eq 'NestedExpression') {
+                $inner = if ($e.PSObject.Properties['expressions']) { @($e.expressions) } else { @() }
+                foreach ($ie in $inner) { $stack.Push($ie) }
+            } else { $dstLeaves.Add($e) }
+        }
 
         # --- Flatten all PathExpression paths from source (with ID translation) ---
-        $srcAllPaths = @($srcLeaves | Where-Object { (Get-SafeProp $_ 'resource_type') -eq 'PathExpression' } | ForEach-Object {
-            Get-SafeProp $_ 'paths'
+        $srcAllPaths = @($srcLeaves | Where-Object { $_.PSObject.Properties['resource_type'] -and $_.resource_type -eq 'PathExpression' } | ForEach-Object {
+            if ($_.PSObject.Properties['paths']) { $_.paths }
         } | ForEach-Object {
             if ($_ -match '^(.*/)([^/]+)$') {
                 $mappedId = if ($GroupIdMap.ContainsKey($Matches[2])) { $GroupIdMap[$Matches[2]] } else { $Matches[2] }
@@ -739,8 +746,8 @@ function Compare-Groups {
             } else { $_ }
         } | Sort-Object)
 
-        $dstAllPaths = @($dstLeaves | Where-Object { (Get-SafeProp $_ 'resource_type') -eq 'PathExpression' } | ForEach-Object {
-            Get-SafeProp $_ 'paths'
+        $dstAllPaths = @($dstLeaves | Where-Object { $_.PSObject.Properties['resource_type'] -and $_.resource_type -eq 'PathExpression' } | ForEach-Object {
+            if ($_.PSObject.Properties['paths']) { $_.paths }
         } | Sort-Object)
 
         $addedPaths   = $dstAllPaths | Where-Object { $_ -notin $srcAllPaths }
@@ -749,12 +756,20 @@ function Compare-Groups {
         if ($removedPaths) { $diffs += "paths missing on dst: $($removedPaths -join ', ')" }
 
         # --- Flatten all Conditions from source and destination ---
-        $srcConditions = @($srcLeaves | Where-Object { (Get-SafeProp $_ 'resource_type') -eq 'Condition' } | ForEach-Object {
-            "$( Get-SafeProp $_ 'member_type' )|$( Get-SafeProp $_ 'key' )|$( Get-SafeProp $_ 'operator' )|$( Get-SafeProp $_ 'value' )"
+        $srcConditions = @($srcLeaves | Where-Object { $_.PSObject.Properties['resource_type'] -and $_.resource_type -eq 'Condition' } | ForEach-Object {
+            $mt = if ($_.PSObject.Properties['member_type']) { $_.member_type } else { '' }
+            $k  = if ($_.PSObject.Properties['key'])         { $_.key         } else { '' }
+            $op = if ($_.PSObject.Properties['operator'])    { $_.operator    } else { '' }
+            $v  = if ($_.PSObject.Properties['value'])       { $_.value       } else { '' }
+            "$mt|$k|$op|$v"
         } | Sort-Object)
 
-        $dstConditions = @($dstLeaves | Where-Object { (Get-SafeProp $_ 'resource_type') -eq 'Condition' } | ForEach-Object {
-            "$( Get-SafeProp $_ 'member_type' )|$( Get-SafeProp $_ 'key' )|$( Get-SafeProp $_ 'operator' )|$( Get-SafeProp $_ 'value' )"
+        $dstConditions = @($dstLeaves | Where-Object { $_.PSObject.Properties['resource_type'] -and $_.resource_type -eq 'Condition' } | ForEach-Object {
+            $mt = if ($_.PSObject.Properties['member_type']) { $_.member_type } else { '' }
+            $k  = if ($_.PSObject.Properties['key'])         { $_.key         } else { '' }
+            $op = if ($_.PSObject.Properties['operator'])    { $_.operator    } else { '' }
+            $v  = if ($_.PSObject.Properties['value'])       { $_.value       } else { '' }
+            "$mt|$k|$op|$v"
         } | Sort-Object)
 
         $addedCond   = $dstConditions | Where-Object { $_ -notin $srcConditions }
