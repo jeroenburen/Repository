@@ -16,6 +16,25 @@
 
     System-owned objects are intentionally excluded from all comparisons.
 
+    MAPPING FILE SUPPORT
+    --------------------
+    The sanitization pipeline (Sanitize-NSX.ps1) renames object IDs so they
+    match their DisplayName. For example:
+        securitygroup-223  →  Datacenter
+        application-228    →  HTTP-8080
+
+    The destination NSX Manager received objects with these new IDs, so a
+    direct source-ID lookup will always fail without the mapping. Supply the
+    mapping CSV files produced by Sanitize-NSX.ps1 to allow the comparison to
+    translate source IDs to their renamed counterparts before looking them up:
+
+        -GroupMappingFile   "NSX_Groups_id_mapping.csv"
+        -ServiceMappingFile "NSX_Services_id_mapping.csv"
+
+    Each mapping CSV must contain columns OldId and NewId (the format written
+    by Sanitize-NSX.ps1). When a mapping file is not provided, comparisons for
+    that object type assume IDs were not changed.
+
     For each object type the script reports:
       ✔ MATCH        — object exists on both sides and key fields agree
       ⚠ MISMATCH     — object exists on both sides but key fields differ
@@ -59,15 +78,35 @@
 .PARAMETER ComparePolicies
     Validate DFW Policies and Rules. Default: $true
 
+.PARAMETER GroupMappingFile
+    Path to the groups ID mapping CSV produced by Sanitize-NSX.ps1
+    (typically named NSX_Groups_id_mapping.csv). Must contain OldId and NewId
+    columns. When provided, source group IDs are translated to their renamed
+    counterparts before being looked up on the destination.
+
+.PARAMETER ServiceMappingFile
+    Path to the services ID mapping CSV produced by Sanitize-NSX.ps1
+    (typically named NSX_Services_id_mapping.csv). Must contain OldId and NewId
+    columns. When provided, source service IDs are translated to their renamed
+    counterparts before being looked up on the destination.
+
 .EXAMPLE
     .\Compare-NSX-Migration.ps1 -SourceNSX nsx4.corp.local -DestNSX nsx9.corp.local
 
 .EXAMPLE
+    # With sanitization mapping files so renamed IDs are matched correctly
     .\Compare-NSX-Migration.ps1 -SourceNSX nsx4.corp.local -DestNSX nsx9.corp.local `
+        -GroupMappingFile   .\NSX_DFW_Export\NSX_Groups_id_mapping.csv `
+        -ServiceMappingFile .\NSX_DFW_Export\NSX_Services_id_mapping.csv
+
+.EXAMPLE
+    .\Compare-NSX-Migration.ps1 -SourceNSX nsx4.corp.local -DestNSX nsx9.corp.local `
+        -GroupMappingFile   .\NSX_DFW_Export\NSX_Groups_id_mapping.csv `
+        -ServiceMappingFile .\NSX_DFW_Export\NSX_Services_id_mapping.csv `
         -OutputFolder C:\Reports\Migration -LogTarget Both
 
 .NOTES
-    Version : 1.0.1
+    Version : 1.1.0
     Changelog:
       1.0.0  Initial release.
       1.0.1  Fixed Build-Map: replaced $_ with $obj inside foreach loop ($_ is
@@ -75,6 +114,13 @@
              Also fixed inverted filter logic — system-owned objects were being
              kept and custom objects skipped, causing all comparisons to return
              empty results and the $_ access to throw under Set-StrictMode.
+      1.1.0  Added -GroupMappingFile and -ServiceMappingFile parameters.
+             The sanitization pipeline renames object IDs (e.g. securitygroup-223
+             → Datacenter). Without the mapping files, every renamed object was
+             reported as MISSING_DST because its old source ID was not found on
+             the destination. The mapping CSVs produced by Sanitize-NSX.ps1 are
+             now loaded into $GroupIdMap and $ServiceIdMap hashtables and used in
+             Compare-ObjectSets to translate source IDs before destination lookup.
 #>
 
 [CmdletBinding()]
@@ -89,10 +135,12 @@ param(
     [bool]$CompareIPSets     = $true,
     [bool]$CompareServices   = $true,
     [bool]$CompareGroups     = $true,
-    [bool]$ComparePolicies   = $true
+    [bool]$ComparePolicies   = $true,
+    [string]$GroupMappingFile   = '',
+    [string]$ServiceMappingFile = ''
 )
 
-$ScriptVersion = '1.0.1'
+$ScriptVersion = '1.1.0'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -105,6 +153,46 @@ $pseudoSystemIds = @(
     'DefaultMaliciousIpGroup',
     'DefaultUDAGroup'
 )
+
+# ─────────────────────────────────────────────────────────────
+# ID MAPPING TABLES
+#
+# Loaded from the _id_mapping.csv files produced by Sanitize-NSX.ps1.
+# These translate source old IDs (e.g. securitygroup-223) to the renamed
+# IDs that were imported into the destination (e.g. Datacenter).
+# Both hashtables default to empty — comparisons then assume no renaming.
+# ─────────────────────────────────────────────────────────────
+$GroupIdMap   = @{}   # oldId -> newId for security groups
+$ServiceIdMap = @{}   # oldId -> newId for services and service groups
+
+function Load-MappingFile {
+    param([string]$FilePath, [string]$Label)
+    $map = @{}
+    if (-not $FilePath) { return $map }
+    if (-not (Test-Path $FilePath)) {
+        Write-Warning "[$Label] Mapping file not found: $FilePath — ID translation disabled for this type."
+        return $map
+    }
+    $rows = Import-Csv -Path $FilePath -Encoding UTF8
+    foreach ($row in $rows) {
+        if ($row.PSObject.Properties['OldId'] -and $row.PSObject.Properties['NewId'] -and $row.OldId -and $row.NewId) {
+            $map[$row.OldId] = $row.NewId
+        }
+    }
+    Write-Host "  [$Label] Loaded $($map.Count) ID mapping(s) from $(Split-Path $FilePath -Leaf)" -ForegroundColor Cyan
+    return $map
+}
+
+if ($GroupMappingFile)   { $GroupIdMap   = Load-MappingFile -FilePath $GroupMappingFile   -Label 'Groups'   }
+if ($ServiceMappingFile) { $ServiceIdMap = Load-MappingFile -FilePath $ServiceMappingFile -Label 'Services' }
+
+# Translates a source object ID to its (potentially renamed) destination ID.
+# Returns the mapped ID if one exists, otherwise returns the original.
+function Resolve-Id {
+    param([string]$Id, [hashtable]$IdMap)
+    if ($IdMap.ContainsKey($Id)) { return $IdMap[$Id] }
+    return $Id
+}
 
 # ─────────────────────────────────────────────────────────────
 # BOOTSTRAP OUTPUT FOLDER & LOG FILE
@@ -276,38 +364,47 @@ function Compare-ObjectSets {
         [string]    $TypeLabel,
         [hashtable] $SrcMap,       # id -> object
         [hashtable] $DstMap,       # id -> object
-        [scriptblock]$CompareFunc  # ($src,$dst) -> @{Equal=$bool; Detail='...'}
+        [scriptblock]$CompareFunc, # ($src,$dst) -> @{Equal=$bool; Detail='...'}
+        [hashtable] $IdMap = @{}   # source oldId -> destination newId (from mapping file)
     )
 
     $counts = @{ Match=0; Mismatch=0; MissingDst=0; MissingSrc=0 }
 
     # Objects present in source — check if they reached the destination
     foreach ($id in $SrcMap.Keys) {
-        $src  = $SrcMap[$id]
-        $name = if ((Get-SafeProp $src 'display_name')) { $src.display_name } else { $id }
+        $src    = $SrcMap[$id]
+        $name   = if ((Get-SafeProp $src 'display_name')) { $src.display_name } else { $id }
+        $dstId  = Resolve-Id -Id $id -IdMap $IdMap   # translate to renamed ID if applicable
+        $idNote = if ($dstId -ne $id) { " (renamed to '$dstId' on destination)" } else { '' }
 
-        if ($DstMap.ContainsKey($id)) {
-            $dst    = $DstMap[$id]
+        if ($DstMap.ContainsKey($dstId)) {
+            $dst    = $DstMap[$dstId]
             $result = & $CompareFunc $src $dst
             if ($result.Equal) {
-                Write-Log "  ✔ MATCH        [$TypeLabel] $id ($name)" SUCCESS
-                Add-Finding -ObjectType $TypeLabel -ObjectId $id -DisplayName $name -Result 'MATCH'
+                Write-Log "  ✔ MATCH        [$TypeLabel] $id ($name)$idNote" SUCCESS
+                Add-Finding -ObjectType $TypeLabel -ObjectId $id -DisplayName $name -Result 'MATCH' -Detail $idNote.Trim()
                 $counts.Match++
             } else {
-                Write-Log "  ⚠ MISMATCH     [$TypeLabel] $id ($name) — $($result.Detail)" WARN
-                Add-Finding -ObjectType $TypeLabel -ObjectId $id -DisplayName $name -Result 'MISMATCH' -Detail $result.Detail
+                Write-Log "  ⚠ MISMATCH     [$TypeLabel] $id ($name)$idNote — $($result.Detail)" WARN
+                Add-Finding -ObjectType $TypeLabel -ObjectId $id -DisplayName $name -Result 'MISMATCH' -Detail ($idNote.Trim() + $(if ($idNote) {' | '} else {''}) + $result.Detail)
                 $counts.Mismatch++
             }
         } else {
-            Write-Log "  ✗ MISSING_DST  [$TypeLabel] $id ($name) — not found on destination" ERROR
-            Add-Finding -ObjectType $TypeLabel -ObjectId $id -DisplayName $name -Result 'MISSING_DST' -Detail 'Object not found on destination NSX Manager'
+            Write-Log "  ✗ MISSING_DST  [$TypeLabel] $id ($name)$idNote — not found on destination" ERROR
+            Add-Finding -ObjectType $TypeLabel -ObjectId $id -DisplayName $name -Result 'MISSING_DST' -Detail "Object not found on destination NSX Manager$idNote"
             $counts.MissingDst++
         }
     }
 
-    # Objects present on destination but not in source (unexpected extras)
+    # Objects present on destination but not traceable back to any source ID
+    # Build the set of all destination IDs that were claimed by a source object
+    $claimedDstIds = @{}
+    foreach ($id in $SrcMap.Keys) {
+        $claimedDstIds[(Resolve-Id -Id $id -IdMap $IdMap)] = $true
+    }
+
     foreach ($id in $DstMap.Keys) {
-        if (-not $SrcMap.ContainsKey($id)) {
+        if (-not $claimedDstIds.ContainsKey($id)) {
             $dst  = $DstMap[$id]
             $name = if ((Get-SafeProp $dst 'display_name')) { $dst.display_name } else { $id }
             Write-Log "  ✗ MISSING_SRC  [$TypeLabel] $id ($name) — exists on destination but not on source" WARN
@@ -474,7 +571,7 @@ function Compare-Services {
     }
 
     Write-Log "  --- Services ---" INFO
-    $c1 = Compare-ObjectSets -TypeLabel 'Service' -SrcMap $srcSvcs -DstMap $dstSvcs -CompareFunc $svcCompare
+    $c1 = Compare-ObjectSets -TypeLabel 'Service' -SrcMap $srcSvcs -DstMap $dstSvcs -CompareFunc $svcCompare -IdMap $ServiceIdMap
     $Stats.Services_Match      += $c1.Match
     $Stats.Services_Mismatch   += $c1.Mismatch
     $Stats.Services_MissingDst += $c1.MissingDst
@@ -482,7 +579,7 @@ function Compare-Services {
     Write-Log "  Services result: $($c1.Match) match | $($c1.Mismatch) mismatch | $($c1.MissingDst) missing on dst | $($c1.MissingSrc) extra on dst" INFO
 
     Write-Log "  --- Service Groups ---" INFO
-    $c2 = Compare-ObjectSets -TypeLabel 'ServiceGroup' -SrcMap $srcSGs -DstMap $dstSGs -CompareFunc $sgCompare
+    $c2 = Compare-ObjectSets -TypeLabel 'ServiceGroup' -SrcMap $srcSGs -DstMap $dstSGs -CompareFunc $sgCompare -IdMap $ServiceIdMap
     $Stats.SvcGroups_Match      += $c2.Match
     $Stats.SvcGroups_Mismatch   += $c2.Mismatch
     $Stats.SvcGroups_MissingDst += $c2.MissingDst
@@ -550,7 +647,7 @@ function Compare-Groups {
         return @{ Equal=$false; Detail=($diffs -join ' | ') }
     }
 
-    $c = Compare-ObjectSets -TypeLabel 'Group' -SrcMap $srcMap -DstMap $dstMap -CompareFunc $compareFunc
+    $c = Compare-ObjectSets -TypeLabel 'Group' -SrcMap $srcMap -DstMap $dstMap -CompareFunc $compareFunc -IdMap $GroupIdMap
     $Stats.Groups_Match      += $c.Match
     $Stats.Groups_Mismatch   += $c.Mismatch
     $Stats.Groups_MissingDst += $c.MissingDst
@@ -876,6 +973,8 @@ Write-Log " Destination NSX : $DestNSX" INFO
 Write-Log " Domain          : $DomainId" INFO
 Write-Log " Output folder   : $OutputFolder" INFO
 Write-Log " Log file        : $LogFile" INFO
+Write-Log " Group mapping   : $(if ($GroupMappingFile)   { $GroupMappingFile   } else { '(none — IDs assumed unchanged)' })" INFO
+Write-Log " Service mapping : $(if ($ServiceMappingFile) { $ServiceMappingFile } else { '(none — IDs assumed unchanged)' })" INFO
 Write-Log "════════════════════════════════════════════════════════════════════" INFO
 Write-Log " NOTE: System-owned objects are EXCLUDED from all comparisons." INFO
 Write-Log "════════════════════════════════════════════════════════════════════" INFO
