@@ -126,9 +126,9 @@ param(
     [bool]$ImportGroups       = $false,
     [bool]$ImportPolicies     = $false,
     [bool]$ImportTags         = $false,
-    [string]$LogFile   = '',
+    [string]$LogFile   = (Join-Path $InputFolder "Import-NSX-DFW_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"),
     [ValidateSet('Screen','File','Both')]
-    [string]$LogTarget = 'Screen'
+    [string]$LogTarget = 'Both'
 )
 
 $ScriptVersion = '1.6.0'
@@ -298,7 +298,8 @@ function Invoke-NSXPatch {
         Invoke-RestMethod -Uri $uri -Method PATCH -Headers $Headers -Body $JsonBody | Out-Null
         return $true
     } catch {
-        Write-Log "PATCH $uri failed: $_" ERROR
+        $detail = $_.ErrorDetails.Message  # NSX error body often has the bad path here
+        Write-Log "PATCH $uri failed: $_ | Detail: $detail" ERROR
         return $false
     }
 }
