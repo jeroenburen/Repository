@@ -663,11 +663,11 @@ try {
     if ($info) { Write-Log "  Connected: NSX $($info.product_version)" SUCCESS }
     else        { throw "Cannot connect to NSX Manager $NSXManager." }
 
-    if ($RemovePolicies)                          { Remove-Policies      }
+    if ($RemovePolicies)                          { Remove-Policies          }
     if ($RemoveServiceGroups -or $RemoveServices) { Remove-ServicesAndGroups }
-    if ($RemoveServices)                          { Remove-Services      }
-    if ($RemoveIPSets)                            { Remove-IPSets        }
-    if ($ClearVMTags)                             { Clear-VMTags         }
+    if ($RemoveGroups)                            { Remove-Groups            }
+    if ($RemoveIPSets)                            { Remove-IPSets            }
+    if ($ClearVMTags)                             { Clear-VMTags             }
 
 } catch {
     Write-Log "FATAL: $_" ERROR
