@@ -1,4 +1,4 @@
-﻿# Version 1.0.0
+﻿# Version 1.1.0
 <#
 .SYNOPSIS
     STEP 1 of 2 — Exports NSX 4 Distributed Firewall objects to CSV files.
@@ -9,6 +9,7 @@
       - Services                       → NSX_Services.csv
       - Service Groups                 → NSX_ServiceGroups.csv
       - Security Groups                → NSX_Groups.csv
+      - Context Profiles               → NSX_Profiles.csv
       - DFW Policies                   → NSX_Policies.csv
       - DFW Rules                      → NSX_Rules.csv
 
@@ -37,6 +38,12 @@
 
 .PARAMETER ExportGroups
     Export Security Groups. Default: $true
+
+.PARAMETER ExportProfiles
+    Export custom Context Profiles (NSX_Profiles.csv). Default: $false
+    Only custom (non-system-owned) profiles are exported. System profiles
+    such as those bundled with NSX (e.g. SSL, HTTP) are present on every
+    NSX instance and do not need to be migrated.
 
 .PARAMETER ExportPolicies
     Export DFW Policies and Rules. Default: $true
@@ -68,6 +75,7 @@ param(
     [bool]$ExportIPSets    = $false,
     [bool]$ExportServices  = $false,
     [bool]$ExportGroups    = $false,
+    [bool]$ExportProfiles  = $false,
     [bool]$ExportPolicies  = $false,
     [bool]$ExportTags      = $false,
     [string]$LogFile   = (Join-Path $OutputFolder "Export-NSX-DFW_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"),
@@ -232,7 +240,7 @@ $OutputFolder = (Resolve-Path $OutputFolder).Path
 # ─────────────────────────────────────────────────────────────
 # STATISTICS
 # ─────────────────────────────────────────────────────────────
-$Stats = @{ IPSets=0; Services=0; ServiceGroups=0; Groups=0; Policies=0; Rules=0; Tags=0 }
+$Stats = @{ IPSets=0; Services=0; ServiceGroups=0; Groups=0; Profiles=0; Policies=0; Rules=0; Tags=0 }
 
 # ═════════════════════════════════════════════════════════════
 # 1. EXPORT IP SETS
@@ -371,7 +379,46 @@ function Export-Groups {
 }
 
 # ═════════════════════════════════════════════════════════════
-# 4. EXPORT DFW POLICIES & RULES
+# 4. EXPORT CONTEXT PROFILES
+# ═════════════════════════════════════════════════════════════
+function Export-Profiles {
+    Write-Log "━━━ Exporting Context Profiles ━━━" INFO
+    $objects = Get-AllPages -Path "/policy/api/v1/infra/context-profiles"
+    $custom  = $objects | Where-Object { (Get-SafeProp $_ '_system_owned') -ne $true }
+
+    if (-not $custom) { Write-Log "No custom Context Profiles found." WARN; return }
+
+    $rows = foreach ($prof in $custom) {
+        $clean      = Remove-ReadOnlyFields $prof
+        $attributes = Get-SafeProp $prof 'attributes'
+        $attrSummary = if ($attributes) {
+            ($attributes | ForEach-Object {
+                $key   = Get-SafeProp $_ 'key'
+                $vals  = Get-SafeProp $_ 'value'
+                $vStr  = if ($vals) { $vals -join ',' } else { '' }
+                "$key=$vStr"
+            }) -join '; '
+        } else { '' }
+
+        [PSCustomObject]@{
+            ObjectType   = 'ContextProfile'
+            Id           = $prof.id
+            DisplayName  = $prof.display_name
+            Description  = (Get-SafeProp $prof 'description')
+            Attributes   = $attrSummary
+            Tags         = (Format-Tags $prof)
+            RawJson      = ($clean | ConvertTo-Json -Depth 20 -Compress)
+        }
+    }
+
+    $csvPath = Join-Path $OutputFolder 'NSX_Profiles.csv'
+    $rows | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
+    $Stats.Profiles = @($rows).Count
+    Write-Log "  Exported $($Stats.Profiles) Context Profiles → $csvPath" SUCCESS
+}
+
+# ═════════════════════════════════════════════════════════════
+# 5. EXPORT DFW POLICIES & RULES
 # ═════════════════════════════════════════════════════════════
 function Export-Policies {
     Write-Log "━━━ Exporting DFW Policies ━━━" INFO
@@ -443,7 +490,7 @@ function Export-Policies {
 
 
 # ═════════════════════════════════════════════════════════════
-# 5. EXPORT VM TAGS
+# 6. EXPORT VM TAGS
 # ═════════════════════════════════════════════════════════════
 function Export-Tags {
     Write-Log "━━━ Exporting VM Tags ━━━" INFO
@@ -496,6 +543,7 @@ try {
     if ($ExportIPSets)   { Export-IPSets   }
     if ($ExportServices) { Export-Services }
     if ($ExportGroups)   { Export-Groups   }
+    if ($ExportProfiles) { Export-Profiles }
     if ($ExportPolicies) { Export-Policies }
     if ($ExportTags)     { Export-Tags     }
 
@@ -510,9 +558,10 @@ try {
     Write-Log "  Services      : $($Stats.Services)"      INFO
     Write-Log "  Svc Groups    : $($Stats.ServiceGroups)" INFO
     Write-Log "  Groups        : $($Stats.Groups)"        INFO
+    Write-Log "  Profiles      : $($Stats.Profiles)"      INFO
     Write-Log "  Policies      : $($Stats.Policies)"      INFO
     Write-Log "  Rules         : $($Stats.Rules)"         INFO
-    Write-Log "  VMs with Tags : $($Stats.Tags)"         INFO
+    Write-Log "  VMs with Tags : $($Stats.Tags)"          INFO
     Write-Log "────────────────────────────────────────────" INFO
     Write-Log "  Output folder : $OutputFolder" INFO
     Write-Log "════════════════════════════════════════════" INFO
