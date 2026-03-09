@@ -109,7 +109,7 @@
         -OutputFolder C:\Reports\Migration -LogTarget Both
 
 .NOTES
-    Version : 1.4.1
+    Version : 1.4.2
     Changelog:
       1.0.0  Initial release.
       1.0.1  Fixed Build-Map: replaced $_ with $obj inside foreach loop ($_ is
@@ -220,7 +220,7 @@ param(
     [string]$ServiceMappingFile = ''
 )
 
-$ScriptVersion = '1.4.1'
+$ScriptVersion = '1.4.2'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -554,8 +554,10 @@ function Compare-IPSets {
         }
 
         # IP addresses (order-insensitive)
-        $srcIPs = @($(if ($src.PSObject.Properties['ip_addresses']) { $src.'ip_addresses' }) | Where-Object { $null -ne $_ } | Sort-Object)
-        $dstIPs = @($(if ($dst.PSObject.Properties['ip_addresses']) { $dst.'ip_addresses' }) | Where-Object { $null -ne $_ } | Sort-Object)
+        $srcIPList = if ($src.PSObject.Properties['ip_addresses'] -and $null -ne $src.ip_addresses) { @($src.ip_addresses) } else { @() }
+        $srcIPs = @($srcIPList | Where-Object { $null -ne $_ } | Sort-Object)
+        $dstIPList = if ($dst.PSObject.Properties['ip_addresses'] -and $null -ne $dst.ip_addresses) { @($dst.ip_addresses) } else { @() }
+        $dstIPs = @($dstIPList | Where-Object { $null -ne $_ } | Sort-Object)
         $added   = $dstIPs | Where-Object { $_ -notin $srcIPs }
         $removed = $srcIPs | Where-Object { $_ -notin $dstIPs }
         if ($added)   { $diffs += "addresses added on dst: $($added -join ', ')" }
@@ -609,8 +611,8 @@ function Compare-Services {
             }
         }
 
-        $srcEntries = @($(if ($src.PSObject.Properties['service_entries']) { $src.'service_entries' }) | Where-Object { $null -ne $_ })
-        $dstEntries = @($(if ($dst.PSObject.Properties['service_entries']) { $dst.'service_entries' }) | Where-Object { $null -ne $_ })
+        $srcEntries = if ($src.PSObject.Properties['service_entries'] -and $null -ne $src.service_entries) { @($src.service_entries) } else { @() }
+        $dstEntries = if ($dst.PSObject.Properties['service_entries'] -and $null -ne $dst.service_entries) { @($dst.service_entries) } else { @() }
         if ($srcEntries.Count -ne $dstEntries.Count) {
             $diffs += "service_entries count: $($srcEntries.Count) → $($dstEntries.Count)"
         } else {
@@ -618,16 +620,14 @@ function Compare-Services {
             # differences between source and destination do not cause false mismatches.
             function Get-EntryKey {
                 param($entry)
-                $rt    = $(if ($entry.PSObject.Properties['resource_type']) { $entry.'resource_type' })
-                $proto = $(if ($entry.PSObject.Properties['l4_protocol']) { $entry.'l4_protocol' })
-                $dport = if (($(if ($entry.PSObject.Properties['destination_ports']) { $entry.'destination_ports' })) -is [array]) {
-                             ($(if ($entry.PSObject.Properties['destination_ports']) { $entry.'destination_ports' }) | Where-Object { $null -ne $_ } | Sort-Object) -join ','
-                         } else { "$($(if ($entry.PSObject.Properties['destination_ports']) { $entry.'destination_ports' }))" }
-                $sport = if (($(if ($entry.PSObject.Properties['source_ports']) { $entry.'source_ports' })) -is [array]) {
-                             ($(if ($entry.PSObject.Properties['source_ports']) { $entry.'source_ports' }) | Where-Object { $null -ne $_ } | Sort-Object) -join ','
-                         } else { "$($(if ($entry.PSObject.Properties['source_ports']) { $entry.'source_ports' }))" }
-                $icmp  = $(if ($entry.PSObject.Properties['icmp_type']) { $entry.'icmp_type' })
-                $pnum  = $(if ($entry.PSObject.Properties['protocol_number']) { $entry.'protocol_number' })
+                $rt    = if ($entry.PSObject.Properties['resource_type']) { $entry.resource_type } else { '' }
+                $proto = if ($entry.PSObject.Properties['l4_protocol']) { $entry.l4_protocol } else { '' }
+                $dportRaw = if ($entry.PSObject.Properties['destination_ports'] -and $null -ne $entry.destination_ports) { $entry.destination_ports } else { $null }
+                $dport = if ($dportRaw -is [array]) { ($dportRaw | Sort-Object) -join ',' } else { "$dportRaw" }
+                $sportRaw = if ($entry.PSObject.Properties['source_ports'] -and $null -ne $entry.source_ports) { $entry.source_ports } else { $null }
+                $sport = if ($sportRaw -is [array]) { ($sportRaw | Sort-Object) -join ',' } else { "$sportRaw" }
+                $icmp  = if ($entry.PSObject.Properties['icmp_type']) { $entry.icmp_type } else { '' }
+                $pnum  = if ($entry.PSObject.Properties['protocol_number']) { $entry.protocol_number } else { '' }
                 return "$rt|$proto|$dport|$sport|$icmp|$pnum"
             }
 
@@ -641,7 +641,7 @@ function Compare-Services {
                     $diffs += "entry[$i] resource_type: $($se.resource_type) → $($de.resource_type)"
                 }
                 foreach ($f in @('l4_protocol','destination_ports','source_ports','icmp_type','protocol_number')) {
-                    $sv = $(if ($se.PSObject.Properties[$f]) { $se.$($f) }); $dv = $(if ($de.PSObject.Properties[$f]) { $de.$($f) })
+                    $sv = if ($se.PSObject.Properties[$f]) { $se.$f } else { $null }; $dv = if ($de.PSObject.Properties[$f]) { $de.$f } else { $null }
                     $svStr = if ($sv -is [array]) { ($sv | Sort-Object) -join ',' } else { "$sv" }
                     $dvStr = if ($dv -is [array]) { ($dv | Sort-Object) -join ',' } else { "$dv" }
                     if ($svStr -ne $dvStr) {
@@ -668,8 +668,10 @@ function Compare-Services {
             }
         }
 
-        $srcMembers = @($(if ($src.PSObject.Properties['members']) { $src.'members' }) | Where-Object { $null -ne $_ } | ForEach-Object { $_.path } | Sort-Object)
-        $dstMembers = @($(if ($dst.PSObject.Properties['members']) { $dst.'members' }) | Where-Object { $null -ne $_ } | ForEach-Object { $_.path } | Sort-Object)
+        $srcMemberList = if ($src.PSObject.Properties['members'] -and $null -ne $src.members) { @($src.members) } else { @() }
+        $srcMembers = @($srcMemberList | Where-Object { $null -ne $_ } | ForEach-Object { $_.path } | Sort-Object)
+        $dstMemberList = if ($dst.PSObject.Properties['members'] -and $null -ne $dst.members) { @($dst.members) } else { @() }
+        $dstMembers = @($dstMemberList | Where-Object { $null -ne $_ } | ForEach-Object { $_.path } | Sort-Object)
         $added   = $dstMembers | Where-Object { $_ -notin $srcMembers }
         $removed = $srcMembers | Where-Object { $_ -notin $dstMembers }
         if ($added)   { $diffs += "members added on dst: $($added -join ', ')" }
@@ -733,29 +735,31 @@ function Compare-Groups {
         # This means conditions/paths split across any structure compare equally.
         $srcLeaves = [System.Collections.Generic.List[object]]::new()
         $stack = [System.Collections.Generic.Stack[object]]::new()
-        foreach ($e in @(if ($src.PSObject.Properties['expression']) { $src.expression } else { @() } ) | Where-Object { $null -ne $_ }) { $stack.Push($e) }
+        $srcExprList = if ($src.PSObject.Properties['expression'] -and $null -ne $src.expression) { @($src.expression) } else { @() }
+        foreach ($e in $srcExprList) { if ($null -ne $e) { $stack.Push($e) } }
         while ($stack.Count -gt 0) {
-            $e  = $stack.Pop()
+            $e = $stack.Pop()
             if ($null -eq $e) { continue }
             $rt = if ($e.PSObject.Properties['resource_type']) { $e.resource_type } else { '' }
             if ($rt -eq 'ConjunctionOperator') { continue }
             if ($rt -eq 'NestedExpression') {
-                $inner = @(if ($e.PSObject.Properties['expressions']) { $e.expressions } else { @() }) | Where-Object { $null -ne $_ }
-                foreach ($ie in $inner) { $stack.Push($ie) }
+                $innerList = if ($e.PSObject.Properties['expressions'] -and $null -ne $e.expressions) { @($e.expressions) } else { @() }
+                foreach ($ie in $innerList) { if ($null -ne $ie) { $stack.Push($ie) } }
             } else { $srcLeaves.Add($e) }
         }
 
         $dstLeaves = [System.Collections.Generic.List[object]]::new()
         $stack = [System.Collections.Generic.Stack[object]]::new()
-        foreach ($e in @(if ($dst.PSObject.Properties['expression']) { $dst.expression } else { @() } ) | Where-Object { $null -ne $_ }) { $stack.Push($e) }
+        $dstExprList = if ($dst.PSObject.Properties['expression'] -and $null -ne $dst.expression) { @($dst.expression) } else { @() }
+        foreach ($e in $dstExprList) { if ($null -ne $e) { $stack.Push($e) } }
         while ($stack.Count -gt 0) {
-            $e  = $stack.Pop()
+            $e = $stack.Pop()
             if ($null -eq $e) { continue }
             $rt = if ($e.PSObject.Properties['resource_type']) { $e.resource_type } else { '' }
             if ($rt -eq 'ConjunctionOperator') { continue }
             if ($rt -eq 'NestedExpression') {
-                $inner = @(if ($e.PSObject.Properties['expressions']) { $e.expressions } else { @() }) | Where-Object { $null -ne $_ }
-                foreach ($ie in $inner) { $stack.Push($ie) }
+                $innerList = if ($e.PSObject.Properties['expressions'] -and $null -ne $e.expressions) { @($e.expressions) } else { @() }
+                foreach ($ie in $innerList) { if ($null -ne $ie) { $stack.Push($ie) } }
             } else { $dstLeaves.Add($e) }
         }
 
@@ -835,7 +839,7 @@ function Compare-Policies {
         $diffs = @()
         if ($src.display_name -ne $dst.display_name) { $diffs += "display_name: '$($src.display_name)' → '$($dst.display_name)'" }
         foreach ($f in @('category','sequence_number')) {
-            $sv = $(if ($src.PSObject.Properties[$f]) { $src.$($f) }); $dv = $(if ($dst.PSObject.Properties[$f]) { $dst.$($f) })
+            $sv = if ($src.PSObject.Properties[$f]) { $src.$f } else { $null }; $dv = if ($dst.PSObject.Properties[$f]) { $dst.$f } else { $null }
             if ("$sv" -ne "$dv") { $diffs += "${f}: '$sv' → '$dv'" }
         }
         if ($diffs.Count -eq 0) { return @{ Equal=$true; Detail='' } }
@@ -855,11 +859,11 @@ function Compare-Policies {
         $diffs = @()
         if ($src.display_name -ne $dst.display_name) { $diffs += "display_name: '$($src.display_name)' → '$($dst.display_name)'" }
         foreach ($f in @('action','direction','ip_protocol','disabled','logged','sequence_number')) {
-            $sv = $(if ($src.PSObject.Properties[$f]) { $src.$($f) }); $dv = $(if ($dst.PSObject.Properties[$f]) { $dst.$($f) })
+            $sv = if ($src.PSObject.Properties[$f]) { $src.$f } else { $null }; $dv = if ($dst.PSObject.Properties[$f]) { $dst.$f } else { $null }
             if ("$sv" -ne "$dv") { $diffs += "${f}: '$sv' → '$dv'" }
         }
         foreach ($listField in @('sources_excluded','destinations_excluded')) {
-            $sv = $(if ($src.PSObject.Properties[$listField]) { $src.$($listField) }); $dv = $(if ($dst.PSObject.Properties[$listField]) { $dst.$($listField) })
+            $sv = if ($src.PSObject.Properties[$listField]) { $src.$listField } else { $null }; $dv = if ($dst.PSObject.Properties[$listField]) { $dst.$listField } else { $null }
             if ("$sv" -ne "$dv") { $diffs += "${listField}: '$sv' → '$dv'" }
         }
         if ($diffs.Count -eq 0) { return @{ Equal=$true; Detail='' } }
@@ -919,18 +923,20 @@ function Compare-Profiles {
 
         # Compare attributes (order-insensitive).
         # Each attribute has a 'key' and a 'value' array. Build canonical key=value strings and compare as sets.
-        $srcAttrs = @($(if ($src.PSObject.Properties['attributes']) { $src.'attributes' }) | Where-Object { $null -ne $_ })
-        $dstAttrs = @($(if ($dst.PSObject.Properties['attributes']) { $dst.'attributes' }) | Where-Object { $null -ne $_ })
+        $srcAttrs = if ($src.PSObject.Properties['attributes'] -and $null -ne $src.attributes) { @($src.attributes) } else { @() }
+        $dstAttrs = if ($dst.PSObject.Properties['attributes'] -and $null -ne $dst.attributes) { @($dst.attributes) } else { @() }
 
         $srcAttrKeys = @($srcAttrs | ForEach-Object {
-            $k = $(if ($_.PSObject.Properties['key']) { $_.'key' })
-            $v = ($(if ($_.PSObject.Properties['value']) { $_.'value' }) | Where-Object { $null -ne $_ } | Sort-Object) -join ','
+            $k = if ($_.PSObject.Properties['key']) { $_.key } else { '' }
+            $vList = if ($_.PSObject.Properties['value'] -and $null -ne $_.value) { @($_.value) } else { @() }
+            $v = ($vList | Sort-Object) -join ','
             "$k=$v"
         } | Sort-Object)
 
         $dstAttrKeys = @($dstAttrs | ForEach-Object {
-            $k = $(if ($_.PSObject.Properties['key']) { $_.'key' })
-            $v = ($(if ($_.PSObject.Properties['value']) { $_.'value' }) | Where-Object { $null -ne $_ } | Sort-Object) -join ','
+            $k = if ($_.PSObject.Properties['key']) { $_.key } else { '' }
+            $vList = if ($_.PSObject.Properties['value'] -and $null -ne $_.value) { @($_.value) } else { @() }
+            $v = ($vList | Sort-Object) -join ','
             "$k=$v"
         } | Sort-Object)
 
