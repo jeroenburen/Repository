@@ -79,6 +79,15 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # ─────────────────────────────────────────────────────────────
+# Groups known to be system-managed but not flagged as _system_owned.
+# These are provisioned by NSX Threat Intelligence, IDS/IPS, and related services.
+# ─────────────────────────────────────────────────────────────
+$pseudoSystemIds = @(
+    'DefaultMaliciousIpGroup',
+    'DefaultUDAGroup'
+)
+
+# ─────────────────────────────────────────────────────────────
 # LOGGING
 # ─────────────────────────────────────────────────────────────
 function Write-Log {
@@ -329,7 +338,11 @@ function Export-Services {
 function Export-Groups {
     Write-Log "━━━ Exporting Security Groups ━━━" INFO
     $objects = Get-AllPages -Path "/policy/api/v1/infra/domains/$DomainId/groups"
-    $custom  = $objects | Where-Object { (Get-SafeProp $_ '_system_owned') -ne $true }
+    $custom = $objects | Where-Object {
+      (Get-SafeProp $_ '_system_owned') -ne $true -and
+      (Get-SafeProp $_ '_create_user')  -ne 'system' -and
+      $_.id -notin $pseudoSystemIds
+    }
 
     if (-not $custom) { Write-Log "No custom Security Groups found." WARN; return }
 

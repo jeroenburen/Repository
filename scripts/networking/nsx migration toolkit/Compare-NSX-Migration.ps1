@@ -93,6 +93,15 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # ─────────────────────────────────────────────────────────────
+# Groups known to be system-managed but not flagged as _system_owned.
+# These are provisioned by NSX Threat Intelligence, IDS/IPS, and related services.
+# ─────────────────────────────────────────────────────────────
+$pseudoSystemIds = @(
+    'DefaultMaliciousIpGroup',
+    'DefaultUDAGroup'
+)
+
+# ─────────────────────────────────────────────────────────────
 # BOOTSTRAP OUTPUT FOLDER & LOG FILE
 # ─────────────────────────────────────────────────────────────
 if (-not (Test-Path $OutputFolder)) {
@@ -305,12 +314,13 @@ function Compare-ObjectSets {
     return $counts
 }
 
+
 # Helper: build an id-keyed hashtable from an array, filtering out system-owned objects
 function Build-Map {
     param([object[]]$Objects)
     $map = @{}
     foreach ($obj in $Objects) {
-        if ((Get-SafeProp $obj '_system_owned') -eq $true) { continue }
+        if ((Get-SafeProp $_ '_system_owned') -ne $true -and (Get-SafeProp $_ '_create_user') -ne 'system' -and $_.id -notin $pseudoSystemIds) { continue }
         $id = Get-SafeProp $obj 'id'
         if ($id) { $map[$id] = $obj }
     }
