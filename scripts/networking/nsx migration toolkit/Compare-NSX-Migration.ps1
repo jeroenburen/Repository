@@ -106,7 +106,7 @@
         -OutputFolder C:\Reports\Migration -LogTarget Both
 
 .NOTES
-    Version : 1.2.0
+    Version : 1.2.1
     Changelog:
       1.0.0  Initial release.
       1.0.1  Fixed Build-Map: replaced $_ with $obj inside foreach loop ($_ is
@@ -128,6 +128,10 @@
              fully order-insensitive for both entries and individual port lists.
              Also added source_ports to the per-field comparison (previously
              omitted).
+      1.2.1  Fixed 'property Count cannot be found' error in service comparison.
+             Sort-Object unwraps single-item arrays to a scalar under
+             Set-StrictMode. Wrapped $srcSorted and $dstSorted in @() to
+             guarantee array type regardless of entry count.
 #>
 
 [CmdletBinding()]
@@ -147,7 +151,7 @@ param(
     [string]$ServiceMappingFile = ''
 )
 
-$ScriptVersion = '1.2.0'
+$ScriptVersion = '1.2.1'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -554,8 +558,8 @@ function Compare-Services {
             }
 
             # Sort both entry lists by their canonical key before comparing
-            $srcSorted = $srcEntries | Sort-Object { Get-EntryKey $_ }
-            $dstSorted = $dstEntries | Sort-Object { Get-EntryKey $_ }
+            $srcSorted = @($srcEntries | Sort-Object { Get-EntryKey $_ })
+            $dstSorted = @($dstEntries | Sort-Object { Get-EntryKey $_ })
 
             for ($i = 0; $i -lt $srcSorted.Count; $i++) {
                 $se = $srcSorted[$i]; $de = $dstSorted[$i]
