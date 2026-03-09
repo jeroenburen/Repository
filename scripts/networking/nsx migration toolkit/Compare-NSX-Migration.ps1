@@ -109,7 +109,7 @@
         -OutputFolder C:\Reports\Migration -LogTarget Both
 
 .NOTES
-    Version : 1.3.9
+    Version : 1.4.0
     Changelog:
       1.0.0  Initial release.
       1.0.1  Fixed Build-Map: replaced $_ with $obj inside foreach loop ($_ is
@@ -220,7 +220,7 @@ param(
     [string]$ServiceMappingFile = ''
 )
 
-$ScriptVersion = '1.3.9'
+$ScriptVersion = '1.4.0'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -733,32 +733,34 @@ function Compare-Groups {
         # This means conditions/paths split across any structure compare equally.
         $srcLeaves = [System.Collections.Generic.List[object]]::new()
         $stack = [System.Collections.Generic.Stack[object]]::new()
-        foreach ($e in @(if ($src.PSObject.Properties['expression']) { $src.expression } else { @() })) { $stack.Push($e) }
+        foreach ($e in @(if ($src.PSObject.Properties['expression']) { $src.expression } else { @() } ) | Where-Object { $null -ne $_ }) { $stack.Push($e) }
         while ($stack.Count -gt 0) {
             $e  = $stack.Pop()
+            if ($null -eq $e) { continue }
             $rt = if ($e.PSObject.Properties['resource_type']) { $e.resource_type } else { '' }
             if ($rt -eq 'ConjunctionOperator') { continue }
             if ($rt -eq 'NestedExpression') {
-                $inner = if ($e.PSObject.Properties['expressions']) { @($e.expressions) } else { @() }
+                $inner = @(if ($e.PSObject.Properties['expressions']) { $e.expressions } else { @() }) | Where-Object { $null -ne $_ }
                 foreach ($ie in $inner) { $stack.Push($ie) }
             } else { $srcLeaves.Add($e) }
         }
 
         $dstLeaves = [System.Collections.Generic.List[object]]::new()
         $stack = [System.Collections.Generic.Stack[object]]::new()
-        foreach ($e in @(if ($dst.PSObject.Properties['expression']) { $dst.expression } else { @() })) { $stack.Push($e) }
+        foreach ($e in @(if ($dst.PSObject.Properties['expression']) { $dst.expression } else { @() } ) | Where-Object { $null -ne $_ }) { $stack.Push($e) }
         while ($stack.Count -gt 0) {
             $e  = $stack.Pop()
+            if ($null -eq $e) { continue }
             $rt = if ($e.PSObject.Properties['resource_type']) { $e.resource_type } else { '' }
             if ($rt -eq 'ConjunctionOperator') { continue }
             if ($rt -eq 'NestedExpression') {
-                $inner = if ($e.PSObject.Properties['expressions']) { @($e.expressions) } else { @() }
+                $inner = @(if ($e.PSObject.Properties['expressions']) { $e.expressions } else { @() }) | Where-Object { $null -ne $_ }
                 foreach ($ie in $inner) { $stack.Push($ie) }
             } else { $dstLeaves.Add($e) }
         }
 
         # --- Flatten all PathExpression paths from source (with ID translation) ---
-        $srcAllPaths = @($srcLeaves | Where-Object { $_.PSObject.Properties['resource_type'] -and $_.resource_type -eq 'PathExpression' } | ForEach-Object {
+        $srcAllPaths = @($srcLeaves | Where-Object { $null -ne $_ -and $_.PSObject.Properties['resource_type'] -and $_.resource_type -eq 'PathExpression' } | ForEach-Object {
             if ($_.PSObject.Properties['paths']) { $_.paths }
         } | ForEach-Object {
             if ($_ -match '^(.*/)([^/]+)$') {
@@ -767,7 +769,7 @@ function Compare-Groups {
             } else { $_ }
         } | Sort-Object)
 
-        $dstAllPaths = @($dstLeaves | Where-Object { $_.PSObject.Properties['resource_type'] -and $_.resource_type -eq 'PathExpression' } | ForEach-Object {
+        $dstAllPaths = @($dstLeaves | Where-Object { $null -ne $_ -and $_.PSObject.Properties['resource_type'] -and $_.resource_type -eq 'PathExpression' } | ForEach-Object {
             if ($_.PSObject.Properties['paths']) { $_.paths }
         } | Sort-Object)
 
@@ -777,7 +779,7 @@ function Compare-Groups {
         if ($removedPaths) { $diffs += "paths missing on dst: $($removedPaths -join ', ')" }
 
         # --- Flatten all Conditions from source and destination ---
-        $srcConditions = @($srcLeaves | Where-Object { $_.PSObject.Properties['resource_type'] -and $_.resource_type -eq 'Condition' } | ForEach-Object {
+        $srcConditions = @($srcLeaves | Where-Object { $null -ne $_ -and $_.PSObject.Properties['resource_type'] -and $_.resource_type -eq 'Condition' } | ForEach-Object {
             $mt = if ($_.PSObject.Properties['member_type']) { $_.member_type } else { '' }
             $k  = if ($_.PSObject.Properties['key'])         { $_.key         } else { '' }
             $op = if ($_.PSObject.Properties['operator'])    { $_.operator    } else { '' }
@@ -785,7 +787,7 @@ function Compare-Groups {
             "$mt|$k|$op|$v"
         } | Sort-Object)
 
-        $dstConditions = @($dstLeaves | Where-Object { $_.PSObject.Properties['resource_type'] -and $_.resource_type -eq 'Condition' } | ForEach-Object {
+        $dstConditions = @($dstLeaves | Where-Object { $null -ne $_ -and $_.PSObject.Properties['resource_type'] -and $_.resource_type -eq 'Condition' } | ForEach-Object {
             $mt = if ($_.PSObject.Properties['member_type']) { $_.member_type } else { '' }
             $k  = if ($_.PSObject.Properties['key'])         { $_.key         } else { '' }
             $op = if ($_.PSObject.Properties['operator'])    { $_.operator    } else { '' }
