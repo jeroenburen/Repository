@@ -1,0 +1,922 @@
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+    Validates an NSX DFW migration by comparing custom objects between source and destination.
+
+.DESCRIPTION
+    Connects to both the source and destination NSX Managers and performs a side-by-side
+    comparison of all custom (non-system-owned) DFW objects:
+
+      - IP Sets
+      - Services
+      - Service Groups
+      - Security Groups
+      - DFW Policies
+      - DFW Rules
+
+    System-owned objects are intentionally excluded from all comparisons.
+
+    For each object type the script reports:
+      ✔ MATCH        — object exists on both sides and key fields agree
+      ⚠ MISMATCH     — object exists on both sides but key fields differ
+      ✗ MISSING_DST  — object exists on source but is absent from destination
+      ✗ MISSING_SRC  — object exists on destination but absent from source (extra/unexpected)
+
+    A full HTML report and a CSV findings file are written to the output folder so you can
+    present the results to your customer.
+
+.PARAMETER SourceNSX
+    FQDN or IP of the source NSX Manager (e.g. NSX 4).
+
+.PARAMETER DestNSX
+    FQDN or IP of the destination NSX Manager (e.g. NSX 9).
+
+.PARAMETER DomainId
+    NSX Policy domain. Default: "default"
+
+.PARAMETER OutputFolder
+    Folder where the report and CSV are written. Created if it does not exist.
+    Default: .\NSX_Validation_<timestamp>
+
+.PARAMETER LogFile
+    Path for the transcript log file. Defaults to a file inside OutputFolder.
+
+.PARAMETER LogTarget
+    Controls where log output is written.
+      Screen : colored output to the console only (default)
+      File   : write to -LogFile only, no console output
+      Both   : colored console output AND written to -LogFile
+
+.PARAMETER CompareIPSets
+    Validate IP Sets. Default: $true
+
+.PARAMETER CompareServices
+    Validate Services and Service Groups. Default: $true
+
+.PARAMETER CompareGroups
+    Validate Security Groups. Default: $true
+
+.PARAMETER ComparePolicies
+    Validate DFW Policies and Rules. Default: $true
+
+.EXAMPLE
+    .\Compare-NSX-Migration.ps1 -SourceNSX nsx4.corp.local -DestNSX nsx9.corp.local
+
+.EXAMPLE
+    .\Compare-NSX-Migration.ps1 -SourceNSX nsx4.corp.local -DestNSX nsx9.corp.local `
+        -OutputFolder C:\Reports\Migration -LogTarget Both
+
+.NOTES
+    Version : 1.0.0
+    Changelog:
+      1.0.0  Initial release.
+#>
+
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory)][string]$SourceNSX,
+    [Parameter(Mandatory)][string]$DestNSX,
+    [string]$DomainId        = 'default',
+    [string]$OutputFolder    = ".\NSX_Validation_$(Get-Date -Format 'yyyyMMdd_HHmmss')",
+    [string]$LogFile         = '',
+    [ValidateSet('Screen','File','Both')]
+    [string]$LogTarget       = 'Screen',
+    [bool]$CompareIPSets     = $true,
+    [bool]$CompareServices   = $true,
+    [bool]$CompareGroups     = $true,
+    [bool]$ComparePolicies   = $true
+)
+
+$ScriptVersion = '1.0.0'
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+# ─────────────────────────────────────────────────────────────
+# BOOTSTRAP OUTPUT FOLDER & LOG FILE
+# ─────────────────────────────────────────────────────────────
+if (-not (Test-Path $OutputFolder)) {
+    New-Item -ItemType Directory -Path $OutputFolder -Force | Out-Null
+}
+$OutputFolder = (Resolve-Path $OutputFolder).Path
+
+if (-not $LogFile) {
+    $LogFile = Join-Path $OutputFolder "Compare-NSX-Migration_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+}
+
+# ─────────────────────────────────────────────────────────────
+# LOGGING
+# ─────────────────────────────────────────────────────────────
+function Write-Log {
+    param(
+        [string]$Message,
+        [ValidateSet('INFO','WARN','ERROR','SUCCESS')][string]$Level = 'INFO'
+    )
+    $ts    = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $line  = "[$ts][$Level] $Message"
+    $color = switch ($Level) {
+        'WARN'    { 'Yellow' }
+        'ERROR'   { 'Red'    }
+        'SUCCESS' { 'Green'  }
+        default   { 'Cyan'   }
+    }
+
+    if ($LogTarget -eq 'Screen' -or $LogTarget -eq 'Both') {
+        Write-Host $line -ForegroundColor $color
+    }
+
+    if (($LogTarget -eq 'File' -or $LogTarget -eq 'Both') -and $LogFile) {
+        try {
+            Add-Content -Path $LogFile -Value $line -Encoding UTF8
+        } catch {
+            Write-Host "[WARN] Could not write to log file: $_" -ForegroundColor Yellow
+            Write-Host $line -ForegroundColor $color
+        }
+    }
+}
+
+# ─────────────────────────────────────────────────────────────
+# IGNORE SELF-SIGNED CERTIFICATES
+# ─────────────────────────────────────────────────────────────
+if (-not ([System.Management.Automation.PSTypeName]'TrustAllCerts').Type) {
+    Add-Type @"
+using System.Net;
+using System.Security.Cryptography.X509Certificates;
+public class TrustAllCerts : ICertificatePolicy {
+    public bool CheckValidationResult(ServicePoint sp, X509Certificate cert,
+        WebRequest req, int problem) { return true; }
+}
+"@
+}
+[System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCerts
+[System.Net.ServicePointManager]::SecurityProtocol  = [System.Net.SecurityProtocolType]::Tls12
+
+# ─────────────────────────────────────────────────────────────
+# CREDENTIALS
+# ─────────────────────────────────────────────────────────────
+Write-Log "Compare-NSX-Migration.ps1 v$ScriptVersion" INFO
+Write-Log "Enter credentials for SOURCE NSX Manager: $SourceNSX" INFO
+$SrcCred   = Get-Credential -Message "SOURCE NSX ($SourceNSX) credentials"
+$SrcPair   = "$($SrcCred.UserName):$($SrcCred.GetNetworkCredential().Password)"
+$SrcBytes  = [System.Text.Encoding]::ASCII.GetBytes($SrcPair)
+$SrcHeaders = @{
+    Authorization  = "Basic $([Convert]::ToBase64String($SrcBytes))"
+    'Content-Type' = 'application/json'
+}
+
+Write-Log "Enter credentials for DESTINATION NSX Manager: $DestNSX" INFO
+$DstCred   = Get-Credential -Message "DESTINATION NSX ($DestNSX) credentials"
+$DstPair   = "$($DstCred.UserName):$($DstCred.GetNetworkCredential().Password)"
+$DstBytes  = [System.Text.Encoding]::ASCII.GetBytes($DstPair)
+$DstHeaders = @{
+    Authorization  = "Basic $([Convert]::ToBase64String($DstBytes))"
+    'Content-Type' = 'application/json'
+}
+
+# ─────────────────────────────────────────────────────────────
+# REST HELPERS
+# ─────────────────────────────────────────────────────────────
+function Invoke-NSXGet {
+    param([string]$Manager, [hashtable]$Headers, [string]$Path)
+    $uri = "https://$Manager$Path"
+    try {
+        return Invoke-RestMethod -Uri $uri -Method GET -Headers $Headers
+    } catch {
+        Write-Log "GET $uri failed: $_" ERROR
+        return $null
+    }
+}
+
+function Get-AllPages {
+    param([string]$Manager, [hashtable]$Headers, [string]$Path)
+    $allResults = @()
+    $cursor     = $null
+    do {
+        $url  = if ($cursor) { "${Path}?cursor=$cursor&page_size=1000" } else { "${Path}?page_size=1000" }
+        $resp = Invoke-NSXGet -Manager $Manager -Headers $Headers -Path $url
+        if ($null -eq $resp) { break }
+        if ($resp.PSObject.Properties['results'] -and $resp.results) {
+            $allResults += $resp.results
+        }
+        $cursor = if ($resp.PSObject.Properties['cursor']) { $resp.cursor } else { $null }
+    } while ($cursor)
+    return $allResults
+}
+
+function Get-SafeProp {
+    param([object]$Obj, [string]$Name)
+    if ($null -eq $Obj) { return $null }
+    if ($Obj.PSObject.Properties[$Name]) { return $Obj.$Name }
+    return $null
+}
+
+function Format-Tags {
+    param([object]$Obj)
+    $tags = Get-SafeProp $Obj 'tags'
+    if (-not $tags) { return '' }
+    return ($tags | ForEach-Object { "$($_.scope):$($_.tag)" }) -join '; '
+}
+
+# ─────────────────────────────────────────────────────────────
+# STATISTICS & FINDINGS COLLECTION
+# ─────────────────────────────────────────────────────────────
+$Stats = @{
+    IPSets_Match       = 0; IPSets_Mismatch   = 0; IPSets_MissingDst  = 0; IPSets_MissingSrc  = 0
+    Services_Match     = 0; Services_Mismatch = 0; Services_MissingDst= 0; Services_MissingSrc= 0
+    SvcGroups_Match    = 0; SvcGroups_Mismatch= 0; SvcGroups_MissingDst=0; SvcGroups_MissingSrc=0
+    Groups_Match       = 0; Groups_Mismatch   = 0; Groups_MissingDst  = 0; Groups_MissingSrc  = 0
+    Policies_Match     = 0; Policies_Mismatch = 0; Policies_MissingDst= 0; Policies_MissingSrc= 0
+    Rules_Match        = 0; Rules_Mismatch    = 0; Rules_MissingDst   = 0; Rules_MissingSrc   = 0
+    TotalMatch         = 0; TotalMismatch     = 0; TotalMissingDst    = 0; TotalMissingSrc    = 0
+    Errors             = 0
+}
+
+# All individual finding rows go here for CSV + HTML export
+$Findings = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+function Add-Finding {
+    param(
+        [string]$ObjectType,
+        [string]$ObjectId,
+        [string]$DisplayName,
+        [ValidateSet('MATCH','MISMATCH','MISSING_DST','MISSING_SRC')][string]$Result,
+        [string]$Detail = ''
+    )
+    $Findings.Add([PSCustomObject]@{
+        ObjectType  = $ObjectType
+        ObjectId    = $ObjectId
+        DisplayName = $DisplayName
+        Result      = $Result
+        Detail      = $Detail
+    })
+}
+
+# ─────────────────────────────────────────────────────────────
+# GENERIC COMPARE HELPER
+# Compares two hashtables (Id -> object) for a given object type.
+# Calls $CompareFunc($srcObj, $dstObj) to check field-level equality.
+# Returns a summary hashtable with Match/Mismatch/MissingDst/MissingSrc counts.
+# ─────────────────────────────────────────────────────────────
+function Compare-ObjectSets {
+    param(
+        [string]    $TypeLabel,
+        [hashtable] $SrcMap,       # id -> object
+        [hashtable] $DstMap,       # id -> object
+        [scriptblock]$CompareFunc  # ($src,$dst) -> @{Equal=$bool; Detail='...'}
+    )
+
+    $counts = @{ Match=0; Mismatch=0; MissingDst=0; MissingSrc=0 }
+
+    # Objects present in source — check if they reached the destination
+    foreach ($id in $SrcMap.Keys) {
+        $src  = $SrcMap[$id]
+        $name = if ((Get-SafeProp $src 'display_name')) { $src.display_name } else { $id }
+
+        if ($DstMap.ContainsKey($id)) {
+            $dst    = $DstMap[$id]
+            $result = & $CompareFunc $src $dst
+            if ($result.Equal) {
+                Write-Log "  ✔ MATCH        [$TypeLabel] $id ($name)" SUCCESS
+                Add-Finding -ObjectType $TypeLabel -ObjectId $id -DisplayName $name -Result 'MATCH'
+                $counts.Match++
+            } else {
+                Write-Log "  ⚠ MISMATCH     [$TypeLabel] $id ($name) — $($result.Detail)" WARN
+                Add-Finding -ObjectType $TypeLabel -ObjectId $id -DisplayName $name -Result 'MISMATCH' -Detail $result.Detail
+                $counts.Mismatch++
+            }
+        } else {
+            Write-Log "  ✗ MISSING_DST  [$TypeLabel] $id ($name) — not found on destination" ERROR
+            Add-Finding -ObjectType $TypeLabel -ObjectId $id -DisplayName $name -Result 'MISSING_DST' -Detail 'Object not found on destination NSX Manager'
+            $counts.MissingDst++
+        }
+    }
+
+    # Objects present on destination but not in source (unexpected extras)
+    foreach ($id in $DstMap.Keys) {
+        if (-not $SrcMap.ContainsKey($id)) {
+            $dst  = $DstMap[$id]
+            $name = if ((Get-SafeProp $dst 'display_name')) { $dst.display_name } else { $id }
+            Write-Log "  ✗ MISSING_SRC  [$TypeLabel] $id ($name) — exists on destination but not on source" WARN
+            Add-Finding -ObjectType $TypeLabel -ObjectId $id -DisplayName $name -Result 'MISSING_SRC' -Detail 'Object exists on destination but has no counterpart on source'
+            $counts.MissingSrc++
+        }
+    }
+
+    return $counts
+}
+
+# Helper: build an id-keyed hashtable from an array, filtering out system-owned objects
+function Build-Map {
+    param([object[]]$Objects)
+    $map = @{}
+    foreach ($obj in $Objects) {
+        if ((Get-SafeProp $obj '_system_owned') -eq $true) { continue }
+        $id = Get-SafeProp $obj 'id'
+        if ($id) { $map[$id] = $obj }
+    }
+    return $map
+}
+
+# ─────────────────────────────────────────────────────────────
+# CONNECTIVITY CHECK
+# ─────────────────────────────────────────────────────────────
+function Test-Connectivity {
+    param([string]$Manager, [hashtable]$Headers, [string]$Label)
+    Write-Log "Checking connectivity to $Label ($Manager)..." INFO
+    $info = Invoke-NSXGet -Manager $Manager -Headers $Headers -Path '/api/v1/node'
+    if ($info) {
+        Write-Log "  Connected — NSX version: $($info.product_version)" SUCCESS
+        return $true
+    } else {
+        Write-Log "  FAILED to connect to $Label ($Manager)" ERROR
+        return $false
+    }
+}
+
+# ═════════════════════════════════════════════════════════════
+# 1. COMPARE IP SETS
+# ═════════════════════════════════════════════════════════════
+function Compare-IPSets {
+    Write-Log "" INFO
+    Write-Log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" INFO
+    Write-Log "  COMPARING IP SETS" INFO
+    Write-Log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" INFO
+
+    Write-Log "  Fetching IP Sets from source ($SourceNSX)..." INFO
+    $srcObjs = Get-AllPages -Manager $SourceNSX -Headers $SrcHeaders -Path '/api/v1/ip-sets'
+    Write-Log "  Fetching IP Sets from destination ($DestNSX)..." INFO
+    $dstObjs = Get-AllPages -Manager $DestNSX   -Headers $DstHeaders -Path '/api/v1/ip-sets'
+
+    $srcMap = Build-Map $srcObjs
+    $dstMap = Build-Map $dstObjs
+    Write-Log "  Source: $($srcMap.Count) custom IP Sets  |  Destination: $($dstMap.Count) custom IP Sets" INFO
+
+    $compareFunc = {
+        param($src, $dst)
+        $diffs = @()
+
+        # Display name
+        if ($src.display_name -ne $dst.display_name) {
+            $diffs += "display_name: '$($src.display_name)' → '$($dst.display_name)'"
+        }
+
+        # IP addresses (order-insensitive)
+        $srcIPs = @(Get-SafeProp $src 'ip_addresses' | Sort-Object)
+        $dstIPs = @(Get-SafeProp $dst 'ip_addresses' | Sort-Object)
+        $added   = $dstIPs | Where-Object { $_ -notin $srcIPs }
+        $removed = $srcIPs | Where-Object { $_ -notin $dstIPs }
+        if ($added)   { $diffs += "addresses added on dst: $($added -join ', ')" }
+        if ($removed) { $diffs += "addresses missing on dst: $($removed -join ', ')" }
+
+        if ($diffs.Count -eq 0) { return @{ Equal=$true;  Detail='' } }
+        return @{ Equal=$false; Detail=($diffs -join ' | ') }
+    }
+
+    $c = Compare-ObjectSets -TypeLabel 'IPSet' -SrcMap $srcMap -DstMap $dstMap -CompareFunc $compareFunc
+    $Stats.IPSets_Match      += $c.Match
+    $Stats.IPSets_Mismatch   += $c.Mismatch
+    $Stats.IPSets_MissingDst += $c.MissingDst
+    $Stats.IPSets_MissingSrc += $c.MissingSrc
+    Write-Log "  IP Sets result: $($c.Match) match | $($c.Mismatch) mismatch | $($c.MissingDst) missing on dst | $($c.MissingSrc) extra on dst" INFO
+}
+
+# ═════════════════════════════════════════════════════════════
+# 2. COMPARE SERVICES & SERVICE GROUPS
+# ═════════════════════════════════════════════════════════════
+function Compare-Services {
+    Write-Log "" INFO
+    Write-Log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" INFO
+    Write-Log "  COMPARING SERVICES" INFO
+    Write-Log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" INFO
+
+    Write-Log "  Fetching Services from source ($SourceNSX)..." INFO
+    $srcAll = Get-AllPages -Manager $SourceNSX -Headers $SrcHeaders -Path '/policy/api/v1/infra/services'
+    Write-Log "  Fetching Services from destination ($DestNSX)..." INFO
+    $dstAll = Get-AllPages -Manager $DestNSX   -Headers $DstHeaders -Path '/policy/api/v1/infra/services'
+
+    # Split into services vs service groups by resource_type
+    $srcSvcs  = Build-Map ($srcAll | Where-Object { (Get-SafeProp $_ 'resource_type') -ne 'PolicyServiceGroup' })
+    $dstSvcs  = Build-Map ($dstAll | Where-Object { (Get-SafeProp $_ 'resource_type') -ne 'PolicyServiceGroup' })
+    $srcSGs   = Build-Map ($srcAll | Where-Object { (Get-SafeProp $_ 'resource_type') -eq 'PolicyServiceGroup' })
+    $dstSGs   = Build-Map ($dstAll | Where-Object { (Get-SafeProp $_ 'resource_type') -eq 'PolicyServiceGroup' })
+
+    Write-Log "  Services  — Source: $($srcSvcs.Count)  |  Destination: $($dstSvcs.Count)" INFO
+    Write-Log "  Svc Groups — Source: $($srcSGs.Count)   |  Destination: $($dstSGs.Count)" INFO
+
+    # Service compare: check display_name + service_entries count + protocol summary
+    $svcCompare = {
+        param($src, $dst)
+        $diffs = @()
+
+        if ($src.display_name -ne $dst.display_name) {
+            $diffs += "display_name: '$($src.display_name)' → '$($dst.display_name)'"
+        }
+
+        $srcEntries = @(Get-SafeProp $src 'service_entries')
+        $dstEntries = @(Get-SafeProp $dst 'service_entries')
+        if ($srcEntries.Count -ne $dstEntries.Count) {
+            $diffs += "service_entries count: $($srcEntries.Count) → $($dstEntries.Count)"
+        } else {
+            # Compare each entry by resource_type and key ports/protocol
+            for ($i = 0; $i -lt $srcEntries.Count; $i++) {
+                $se = $srcEntries[$i]; $de = $dstEntries[$i]
+                if ($se.resource_type -ne $de.resource_type) {
+                    $diffs += "entry[$i] resource_type: $($se.resource_type) → $($de.resource_type)"
+                }
+                foreach ($f in @('l4_protocol','destination_ports','icmp_type','protocol_number')) {
+                    $sv = Get-SafeProp $se $f; $dv = Get-SafeProp $de $f
+                    $svStr = if ($sv -is [array]) { ($sv | Sort-Object) -join ',' } else { "$sv" }
+                    $dvStr = if ($dv -is [array]) { ($dv | Sort-Object) -join ',' } else { "$dv" }
+                    if ($svStr -ne $dvStr) {
+                        $diffs += "entry[$i].${f}: '$svStr' → '$dvStr'"
+                    }
+                }
+            }
+        }
+
+        if ($diffs.Count -eq 0) { return @{ Equal=$true; Detail='' } }
+        return @{ Equal=$false; Detail=($diffs -join ' | ') }
+    }
+
+    # Service group compare: check display_name + member paths (order-insensitive)
+    $sgCompare = {
+        param($src, $dst)
+        $diffs = @()
+
+        if ($src.display_name -ne $dst.display_name) {
+            $diffs += "display_name: '$($src.display_name)' → '$($dst.display_name)'"
+        }
+
+        $srcMembers = @(Get-SafeProp $src 'members' | ForEach-Object { $_.path } | Sort-Object)
+        $dstMembers = @(Get-SafeProp $dst 'members' | ForEach-Object { $_.path } | Sort-Object)
+        $added   = $dstMembers | Where-Object { $_ -notin $srcMembers }
+        $removed = $srcMembers | Where-Object { $_ -notin $dstMembers }
+        if ($added)   { $diffs += "members added on dst: $($added -join ', ')" }
+        if ($removed) { $diffs += "members missing on dst: $($removed -join ', ')" }
+
+        if ($diffs.Count -eq 0) { return @{ Equal=$true; Detail='' } }
+        return @{ Equal=$false; Detail=($diffs -join ' | ') }
+    }
+
+    Write-Log "  --- Services ---" INFO
+    $c1 = Compare-ObjectSets -TypeLabel 'Service' -SrcMap $srcSvcs -DstMap $dstSvcs -CompareFunc $svcCompare
+    $Stats.Services_Match      += $c1.Match
+    $Stats.Services_Mismatch   += $c1.Mismatch
+    $Stats.Services_MissingDst += $c1.MissingDst
+    $Stats.Services_MissingSrc += $c1.MissingSrc
+    Write-Log "  Services result: $($c1.Match) match | $($c1.Mismatch) mismatch | $($c1.MissingDst) missing on dst | $($c1.MissingSrc) extra on dst" INFO
+
+    Write-Log "  --- Service Groups ---" INFO
+    $c2 = Compare-ObjectSets -TypeLabel 'ServiceGroup' -SrcMap $srcSGs -DstMap $dstSGs -CompareFunc $sgCompare
+    $Stats.SvcGroups_Match      += $c2.Match
+    $Stats.SvcGroups_Mismatch   += $c2.Mismatch
+    $Stats.SvcGroups_MissingDst += $c2.MissingDst
+    $Stats.SvcGroups_MissingSrc += $c2.MissingSrc
+    Write-Log "  Service Groups result: $($c2.Match) match | $($c2.Mismatch) mismatch | $($c2.MissingDst) missing on dst | $($c2.MissingSrc) extra on dst" INFO
+}
+
+# ═════════════════════════════════════════════════════════════
+# 3. COMPARE SECURITY GROUPS
+# ═════════════════════════════════════════════════════════════
+function Compare-Groups {
+    Write-Log "" INFO
+    Write-Log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" INFO
+    Write-Log "  COMPARING SECURITY GROUPS" INFO
+    Write-Log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" INFO
+
+    Write-Log "  Fetching Security Groups from source ($SourceNSX)..." INFO
+    $srcObjs = Get-AllPages -Manager $SourceNSX -Headers $SrcHeaders -Path "/policy/api/v1/infra/domains/$DomainId/groups"
+    Write-Log "  Fetching Security Groups from destination ($DestNSX)..." INFO
+    $dstObjs = Get-AllPages -Manager $DestNSX   -Headers $DstHeaders -Path "/policy/api/v1/infra/domains/$DomainId/groups"
+
+    $srcMap = Build-Map $srcObjs
+    $dstMap = Build-Map $dstObjs
+    Write-Log "  Source: $($srcMap.Count) custom Groups  |  Destination: $($dstMap.Count) custom Groups" INFO
+
+    $compareFunc = {
+        param($src, $dst)
+        $diffs = @()
+
+        if ($src.display_name -ne $dst.display_name) {
+            $diffs += "display_name: '$($src.display_name)' → '$($dst.display_name)'"
+        }
+
+        # Compare expression count and types
+        $srcExpr = @(Get-SafeProp $src 'expression')
+        $dstExpr = @(Get-SafeProp $dst 'expression')
+        if ($srcExpr.Count -ne $dstExpr.Count) {
+            $diffs += "expression count: $($srcExpr.Count) → $($dstExpr.Count)"
+        } else {
+            for ($i = 0; $i -lt $srcExpr.Count; $i++) {
+                $se = $srcExpr[$i]; $de = $dstExpr[$i]
+                if ($se.resource_type -ne $de.resource_type) {
+                    $diffs += "expr[$i] resource_type: $($se.resource_type) → $($de.resource_type)"
+                }
+                # For Conditions compare key fields
+                if ($se.resource_type -eq 'Condition') {
+                    foreach ($f in @('key','operator','value','member_type')) {
+                        $sv = Get-SafeProp $se $f; $dv = Get-SafeProp $de $f
+                        if ("$sv" -ne "$dv") { $diffs += "expr[$i].${f}: '$sv' → '$dv'" }
+                    }
+                }
+                # For PathExpression compare paths (order-insensitive)
+                if ($se.resource_type -eq 'PathExpression') {
+                    $srcPaths = @(Get-SafeProp $se 'paths' | Sort-Object)
+                    $dstPaths = @(Get-SafeProp $de 'paths' | Sort-Object)
+                    $added    = $dstPaths | Where-Object { $_ -notin $srcPaths }
+                    $removed  = $srcPaths | Where-Object { $_ -notin $dstPaths }
+                    if ($added)   { $diffs += "expr[$i] paths added: $($added -join ', ')" }
+                    if ($removed) { $diffs += "expr[$i] paths missing: $($removed -join ', ')" }
+                }
+            }
+        }
+
+        if ($diffs.Count -eq 0) { return @{ Equal=$true; Detail='' } }
+        return @{ Equal=$false; Detail=($diffs -join ' | ') }
+    }
+
+    $c = Compare-ObjectSets -TypeLabel 'Group' -SrcMap $srcMap -DstMap $dstMap -CompareFunc $compareFunc
+    $Stats.Groups_Match      += $c.Match
+    $Stats.Groups_Mismatch   += $c.Mismatch
+    $Stats.Groups_MissingDst += $c.MissingDst
+    $Stats.Groups_MissingSrc += $c.MissingSrc
+    Write-Log "  Security Groups result: $($c.Match) match | $($c.Mismatch) mismatch | $($c.MissingDst) missing on dst | $($c.MissingSrc) extra on dst" INFO
+}
+
+# ═════════════════════════════════════════════════════════════
+# 4. COMPARE DFW POLICIES & RULES
+# ═════════════════════════════════════════════════════════════
+function Compare-Policies {
+    Write-Log "" INFO
+    Write-Log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" INFO
+    Write-Log "  COMPARING DFW POLICIES" INFO
+    Write-Log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" INFO
+
+    Write-Log "  Fetching DFW Policies from source ($SourceNSX)..." INFO
+    $srcPolicies = Get-AllPages -Manager $SourceNSX -Headers $SrcHeaders -Path "/policy/api/v1/infra/domains/$DomainId/security-policies"
+    Write-Log "  Fetching DFW Policies from destination ($DestNSX)..." INFO
+    $dstPolicies = Get-AllPages -Manager $DestNSX   -Headers $DstHeaders -Path "/policy/api/v1/infra/domains/$DomainId/security-policies"
+
+    $srcPolMap = Build-Map $srcPolicies
+    $dstPolMap = Build-Map $dstPolicies
+    Write-Log "  Source: $($srcPolMap.Count) custom Policies  |  Destination: $($dstPolMap.Count) custom Policies" INFO
+
+    $polCompare = {
+        param($src, $dst)
+        $diffs = @()
+
+        if ($src.display_name -ne $dst.display_name) {
+            $diffs += "display_name: '$($src.display_name)' → '$($dst.display_name)'"
+        }
+        foreach ($f in @('category','stateful','tcp_strict')) {
+            $sv = Get-SafeProp $src $f; $dv = Get-SafeProp $dst $f
+            if ("$sv" -ne "$dv") { $diffs += "${f}: '$sv' → '$dv'" }
+        }
+        # Scope (applied-to) — order-insensitive
+        $srcScope = @(Get-SafeProp $src 'scope' | Sort-Object)
+        $dstScope = @(Get-SafeProp $dst 'scope' | Sort-Object)
+        if (($srcScope -join ';') -ne ($dstScope -join ';')) {
+            $diffs += "scope: '$($srcScope -join '; ')' → '$($dstScope -join '; ')'"
+        }
+
+        if ($diffs.Count -eq 0) { return @{ Equal=$true; Detail='' } }
+        return @{ Equal=$false; Detail=($diffs -join ' | ') }
+    }
+
+    $c = Compare-ObjectSets -TypeLabel 'Policy' -SrcMap $srcPolMap -DstMap $dstPolMap -CompareFunc $polCompare
+    $Stats.Policies_Match      += $c.Match
+    $Stats.Policies_Mismatch   += $c.Mismatch
+    $Stats.Policies_MissingDst += $c.MissingDst
+    $Stats.Policies_MissingSrc += $c.MissingSrc
+    Write-Log "  Policies result: $($c.Match) match | $($c.Mismatch) mismatch | $($c.MissingDst) missing on dst | $($c.MissingSrc) extra on dst" INFO
+
+    # ── RULES ────────────────────────────────────────────────
+    Write-Log "" INFO
+    Write-Log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" INFO
+    Write-Log "  COMPARING DFW RULES (iterating over all custom policies)" INFO
+    Write-Log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" INFO
+
+    $ruleCompare = {
+        param($src, $dst)
+        $diffs = @()
+
+        if ($src.display_name -ne $dst.display_name) {
+            $diffs += "display_name: '$($src.display_name)' → '$($dst.display_name)'"
+        }
+        foreach ($f in @('action','direction','ip_protocol','disabled','logged')) {
+            $sv = Get-SafeProp $src $f; $dv = Get-SafeProp $dst $f
+            if ("$sv" -ne "$dv") { $diffs += "${f}: '$sv' → '$dv'" }
+        }
+        foreach ($listField in @('source_groups','destination_groups','services','scope')) {
+            $sv = @(Get-SafeProp $src $listField | Sort-Object)
+            $dv = @(Get-SafeProp $dst $listField | Sort-Object)
+            if (($sv -join ';') -ne ($dv -join ';')) {
+                $diffs += "${listField}: src='$($sv -join ', ')' dst='$($dv -join ', ')'"
+            }
+        }
+
+        if ($diffs.Count -eq 0) { return @{ Equal=$true; Detail='' } }
+        return @{ Equal=$false; Detail=($diffs -join ' | ') }
+    }
+
+    # Iterate all source policies to compare their rules
+    $allPolicyIds = ($srcPolMap.Keys + $dstPolMap.Keys) | Sort-Object -Unique
+    foreach ($polId in $allPolicyIds) {
+        $polName = ''
+        if ($srcPolMap.ContainsKey($polId)) { $polName = $srcPolMap[$polId].display_name }
+        elseif ($dstPolMap.ContainsKey($polId)) { $polName = $dstPolMap[$polId].display_name }
+
+        # Skip if this policy is system-owned (already excluded by Build-Map, but be safe)
+        Write-Log "  Policy '$polId' ($polName) — fetching rules from both sides..." INFO
+
+        $srcRules = @()
+        $dstRules = @()
+
+        if ($srcPolMap.ContainsKey($polId)) {
+            $srcRules = @(Get-AllPages -Manager $SourceNSX -Headers $SrcHeaders `
+                -Path "/policy/api/v1/infra/domains/$DomainId/security-policies/$polId/rules")
+        }
+        if ($dstPolMap.ContainsKey($polId)) {
+            $dstRules = @(Get-AllPages -Manager $DestNSX -Headers $DstHeaders `
+                -Path "/policy/api/v1/infra/domains/$DomainId/security-policies/$polId/rules")
+        }
+
+        $srcRuleMap = @{}
+        foreach ($r in $srcRules) { if (Get-SafeProp $r 'id') { $srcRuleMap[$r.id] = $r } }
+        $dstRuleMap = @{}
+        foreach ($r in $dstRules) { if (Get-SafeProp $r 'id') { $dstRuleMap[$r.id] = $r } }
+
+        Write-Log "    Rules — Source: $($srcRuleMap.Count)  |  Destination: $($dstRuleMap.Count)" INFO
+
+        $rc = Compare-ObjectSets -TypeLabel "Rule[$polName]" -SrcMap $srcRuleMap -DstMap $dstRuleMap -CompareFunc $ruleCompare
+        $Stats.Rules_Match      += $rc.Match
+        $Stats.Rules_Mismatch   += $rc.Mismatch
+        $Stats.Rules_MissingDst += $rc.MissingDst
+        $Stats.Rules_MissingSrc += $rc.MissingSrc
+    }
+    Write-Log "  Rules result: $($Stats.Rules_Match) match | $($Stats.Rules_Mismatch) mismatch | $($Stats.Rules_MissingDst) missing on dst | $($Stats.Rules_MissingSrc) extra on dst" INFO
+}
+
+# ─────────────────────────────────────────────────────────────
+# REPORT GENERATION
+# ─────────────────────────────────────────────────────────────
+function Export-CsvReport {
+    $csvPath = Join-Path $OutputFolder "NSX_Migration_Validation_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
+    $Findings | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
+    Write-Log "  CSV report written to: $csvPath" SUCCESS
+    return $csvPath
+}
+
+function Get-ResultBadge {
+    param([string]$Result)
+    switch ($Result) {
+        'MATCH'       { return '<span class="badge match">✔ MATCH</span>' }
+        'MISMATCH'    { return '<span class="badge mismatch">⚠ MISMATCH</span>' }
+        'MISSING_DST' { return '<span class="badge missing-dst">✗ MISSING ON DST</span>' }
+        'MISSING_SRC' { return '<span class="badge missing-src">✗ EXTRA ON DST</span>' }
+        default       { return "<span class='badge'>$Result</span>" }
+    }
+}
+
+function Export-HtmlReport {
+    param([string]$CsvPath)
+
+    $totalMatch      = ($Stats.IPSets_Match + $Stats.Services_Match + $Stats.SvcGroups_Match + $Stats.Groups_Match + $Stats.Policies_Match + $Stats.Rules_Match)
+    $totalMismatch   = ($Stats.IPSets_Mismatch + $Stats.Services_Mismatch + $Stats.SvcGroups_Mismatch + $Stats.Groups_Mismatch + $Stats.Policies_Mismatch + $Stats.Rules_Mismatch)
+    $totalMissingDst = ($Stats.IPSets_MissingDst + $Stats.Services_MissingDst + $Stats.SvcGroups_MissingDst + $Stats.Groups_MissingDst + $Stats.Policies_MissingDst + $Stats.Rules_MissingDst)
+    $totalMissingSrc = ($Stats.IPSets_MissingSrc + $Stats.Services_MissingSrc + $Stats.SvcGroups_MissingSrc + $Stats.Groups_MissingSrc + $Stats.Policies_MissingSrc + $Stats.Rules_MissingSrc)
+    $totalObjects    = $totalMatch + $totalMismatch + $totalMissingDst + $totalMissingSrc
+    $overallStatus   = if ($totalMismatch -eq 0 -and $totalMissingDst -eq 0) { 'PASSED' } else { 'ISSUES FOUND' }
+    $statusColor     = if ($overallStatus -eq 'PASSED') { '#16a34a' } else { '#dc2626' }
+    $reportDate      = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+
+    # Build findings table rows
+    $tableRows = foreach ($finding in $Findings) {
+        $badge   = Get-ResultBadge -Result $finding.Result
+        $rowClass = switch ($finding.Result) {
+            'MATCH'       { 'row-match' }
+            'MISMATCH'    { 'row-mismatch' }
+            'MISSING_DST' { 'row-missing-dst' }
+            'MISSING_SRC' { 'row-missing-src' }
+        }
+        $detail = [System.Web.HttpUtility]::HtmlEncode($finding.Detail)
+        "<tr class='$rowClass'><td>$([System.Web.HttpUtility]::HtmlEncode($finding.ObjectType))</td><td><code>$([System.Web.HttpUtility]::HtmlEncode($finding.ObjectId))</code></td><td>$([System.Web.HttpUtility]::HtmlEncode($finding.DisplayName))</td><td>$badge</td><td class='detail'>$detail</td></tr>"
+    }
+
+    # Summary rows
+    $summaryData = @(
+        @{ Type='IP Sets';        Match=$Stats.IPSets_Match;     Mismatch=$Stats.IPSets_Mismatch;     MissingDst=$Stats.IPSets_MissingDst;     MissingSrc=$Stats.IPSets_MissingSrc }
+        @{ Type='Services';       Match=$Stats.Services_Match;   Mismatch=$Stats.Services_Mismatch;   MissingDst=$Stats.Services_MissingDst;   MissingSrc=$Stats.Services_MissingSrc }
+        @{ Type='Service Groups'; Match=$Stats.SvcGroups_Match;  Mismatch=$Stats.SvcGroups_Mismatch;  MissingDst=$Stats.SvcGroups_MissingDst;  MissingSrc=$Stats.SvcGroups_MissingSrc }
+        @{ Type='Security Groups';Match=$Stats.Groups_Match;     Mismatch=$Stats.Groups_Mismatch;     MissingDst=$Stats.Groups_MissingDst;     MissingSrc=$Stats.Groups_MissingSrc }
+        @{ Type='DFW Policies';   Match=$Stats.Policies_Match;   Mismatch=$Stats.Policies_Mismatch;   MissingDst=$Stats.Policies_MissingDst;   MissingSrc=$Stats.Policies_MissingSrc }
+        @{ Type='DFW Rules';      Match=$Stats.Rules_Match;      Mismatch=$Stats.Rules_Mismatch;      MissingDst=$Stats.Rules_MissingDst;      MissingSrc=$Stats.Rules_MissingSrc }
+    )
+    $summaryRows = foreach ($row in $summaryData) {
+        $rowOk = ($row.Mismatch -eq 0 -and $row.MissingDst -eq 0) 
+        $icon  = if ($rowOk) { '✔' } else { '⚠' }
+        $cls   = if ($rowOk) { 'sum-ok' } else { 'sum-warn' }
+        "<tr class='$cls'><td>$icon $($row.Type)</td><td class='num'>$($row.Match)</td><td class='num warn-cell'>$($row.Mismatch)</td><td class='num err-cell'>$($row.MissingDst)</td><td class='num info-cell'>$($row.MissingSrc)</td></tr>"
+    }
+
+    $html = @"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>NSX Migration Validation Report</title>
+<style>
+  :root{--green:#16a34a;--red:#dc2626;--amber:#d97706;--blue:#2563eb;--gray:#6b7280;--bg:#f9fafb;--card:#fff;--border:#e5e7eb}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:#111;padding:2rem}
+  h1{font-size:1.6rem;font-weight:700;margin-bottom:.25rem}
+  .subtitle{color:var(--gray);font-size:.9rem;margin-bottom:2rem}
+  .header-meta{display:flex;gap:2rem;flex-wrap:wrap;margin-bottom:2rem;padding:1rem 1.25rem;background:var(--card);border:1px solid var(--border);border-radius:.5rem}
+  .meta-item label{font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;color:var(--gray);display:block}
+  .meta-item span{font-size:.95rem;font-weight:600}
+  .overall{display:inline-block;padding:.35rem 1rem;border-radius:9999px;color:#fff;font-weight:700;font-size:1rem;background:$statusColor}
+  .kpi-row{display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:2rem}
+  .kpi{flex:1 1 140px;background:var(--card);border:1px solid var(--border);border-radius:.5rem;padding:1rem 1.25rem;text-align:center}
+  .kpi .num{font-size:2rem;font-weight:800}
+  .kpi .lbl{font-size:.8rem;color:var(--gray);margin-top:.25rem}
+  .kpi.green .num{color:var(--green)} .kpi.amber .num{color:var(--amber)} .kpi.red .num{color:var(--red)} .kpi.blue .num{color:var(--blue)}
+  section{margin-bottom:2.5rem}
+  h2{font-size:1.1rem;font-weight:700;margin-bottom:.75rem;border-bottom:2px solid var(--border);padding-bottom:.4rem}
+  table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--border);border-radius:.5rem;overflow:hidden;font-size:.875rem}
+  th{background:#f3f4f6;text-align:left;padding:.6rem .9rem;font-size:.75rem;text-transform:uppercase;letter-spacing:.04em;color:var(--gray);border-bottom:1px solid var(--border)}
+  td{padding:.55rem .9rem;border-bottom:1px solid var(--border);vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  .num{text-align:center}
+  .warn-cell{color:var(--amber);font-weight:600}
+  .err-cell{color:var(--red);font-weight:600}
+  .info-cell{color:var(--blue)}
+  .sum-ok td:first-child{color:var(--green)}
+  .sum-warn td:first-child{color:var(--amber);font-weight:600}
+  .badge{display:inline-block;padding:.2rem .6rem;border-radius:9999px;font-size:.75rem;font-weight:700;white-space:nowrap}
+  .badge.match{background:#dcfce7;color:#166534}
+  .badge.mismatch{background:#fef3c7;color:#92400e}
+  .badge.missing-dst{background:#fee2e2;color:#991b1b}
+  .badge.missing-src{background:#dbeafe;color:#1e40af}
+  .row-mismatch td{background:#fffbeb}
+  .row-missing-dst td{background:#fff5f5}
+  .row-missing-src td{background:#eff6ff}
+  .detail{color:#374151;font-size:.8rem;word-break:break-all}
+  code{font-family:monospace;font-size:.8rem;background:#f3f4f6;padding:.1rem .3rem;border-radius:.2rem}
+  .filter-bar{margin-bottom:.75rem;display:flex;gap:.5rem;flex-wrap:wrap}
+  .filter-btn{padding:.35rem .85rem;border:1px solid var(--border);border-radius:9999px;background:var(--card);cursor:pointer;font-size:.8rem;font-weight:500}
+  .filter-btn:hover,.filter-btn.active{background:#111;color:#fff;border-color:#111}
+  footer{margin-top:3rem;font-size:.75rem;color:var(--gray);text-align:center}
+</style>
+</head>
+<body>
+<h1>NSX DFW Migration Validation Report</h1>
+<p class="subtitle">Custom object comparison — system-owned objects excluded</p>
+
+<div class="header-meta">
+  <div class="meta-item"><label>Report Date</label><span>$reportDate</span></div>
+  <div class="meta-item"><label>Source NSX Manager</label><span>$SourceNSX</span></div>
+  <div class="meta-item"><label>Destination NSX Manager</label><span>$DestNSX</span></div>
+  <div class="meta-item"><label>Domain</label><span>$DomainId</span></div>
+  <div class="meta-item"><label>Overall Status</label><span class="overall">$overallStatus</span></div>
+</div>
+
+<div class="kpi-row">
+  <div class="kpi green"><div class="num">$totalMatch</div><div class="lbl">Matched</div></div>
+  <div class="kpi amber"><div class="num">$totalMismatch</div><div class="lbl">Mismatched</div></div>
+  <div class="kpi red"><div class="num">$totalMissingDst</div><div class="lbl">Missing on Dst</div></div>
+  <div class="kpi blue"><div class="num">$totalMissingSrc</div><div class="lbl">Extra on Dst</div></div>
+  <div class="kpi"><div class="num">$totalObjects</div><div class="lbl">Total Compared</div></div>
+</div>
+
+<section>
+  <h2>Summary by Object Type</h2>
+  <table>
+    <thead><tr><th>Object Type</th><th class="num">Match</th><th class="num">Mismatch</th><th class="num">Missing on Dst</th><th class="num">Extra on Dst</th></tr></thead>
+    <tbody>$($summaryRows -join "`n")</tbody>
+    <tfoot><tr style="font-weight:700;background:#f3f4f6"><td>TOTAL</td><td class="num">$totalMatch</td><td class="num warn-cell">$totalMismatch</td><td class="num err-cell">$totalMissingDst</td><td class="num info-cell">$totalMissingSrc</td></tr></tfoot>
+  </table>
+</section>
+
+<section>
+  <h2>Detailed Findings</h2>
+  <div class="filter-bar">
+    <button class="filter-btn active" onclick="filterTable('ALL',this)">All</button>
+    <button class="filter-btn" onclick="filterTable('MATCH',this)">✔ Match</button>
+    <button class="filter-btn" onclick="filterTable('MISMATCH',this)">⚠ Mismatch</button>
+    <button class="filter-btn" onclick="filterTable('MISSING_DST',this)">✗ Missing on Dst</button>
+    <button class="filter-btn" onclick="filterTable('MISSING_SRC',this)">✗ Extra on Dst</button>
+  </div>
+  <table id="findingsTable">
+    <thead><tr><th>Type</th><th>ID</th><th>Display Name</th><th>Result</th><th>Detail</th></tr></thead>
+    <tbody>$($tableRows -join "`n")</tbody>
+  </table>
+</section>
+
+<footer>Generated by Compare-NSX-Migration.ps1 v$ScriptVersion &nbsp;|&nbsp; $reportDate</footer>
+
+<script>
+function filterTable(filter, btn) {
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  const rows = document.querySelectorAll('#findingsTable tbody tr');
+  rows.forEach(row => {
+    if (filter === 'ALL') { row.style.display = ''; return; }
+    const badge = row.querySelector('.badge');
+    if (!badge) { row.style.display = 'none'; return; }
+    const cls = badge.className;
+    const show =
+      (filter === 'MATCH'       && cls.includes('match') && !cls.includes('mis')) ||
+      (filter === 'MISMATCH'    && cls.includes('mismatch')) ||
+      (filter === 'MISSING_DST' && cls.includes('missing-dst')) ||
+      (filter === 'MISSING_SRC' && cls.includes('missing-src'));
+    row.style.display = show ? '' : 'none';
+  });
+}
+</script>
+</body>
+</html>
+"@
+
+    # Need System.Web for HtmlEncode — use a simple fallback if unavailable
+    # (already used above; if the assembly isn't loaded the above will have thrown)
+    $htmlPath = Join-Path $OutputFolder "NSX_Migration_Validation_$(Get-Date -Format 'yyyyMMdd_HHmmss').html"
+    [System.IO.File]::WriteAllText($htmlPath, $html, [System.Text.Encoding]::UTF8)
+    Write-Log "  HTML report written to: $htmlPath" SUCCESS
+    return $htmlPath
+}
+
+# ─────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────
+
+# Load System.Web for HtmlEncode (used in HTML report)
+try { Add-Type -AssemblyName System.Web -ErrorAction SilentlyContinue } catch {}
+
+Write-Log "════════════════════════════════════════════════════════════════════" INFO
+Write-Log " NSX DFW MIGRATION VALIDATION" INFO
+Write-Log " Script version  : $ScriptVersion" INFO
+Write-Log " Source NSX      : $SourceNSX" INFO
+Write-Log " Destination NSX : $DestNSX" INFO
+Write-Log " Domain          : $DomainId" INFO
+Write-Log " Output folder   : $OutputFolder" INFO
+Write-Log " Log file        : $LogFile" INFO
+Write-Log "════════════════════════════════════════════════════════════════════" INFO
+Write-Log " NOTE: System-owned objects are EXCLUDED from all comparisons." INFO
+Write-Log "════════════════════════════════════════════════════════════════════" INFO
+
+try {
+    # Connectivity checks
+    $srcOk = Test-Connectivity -Manager $SourceNSX -Headers $SrcHeaders -Label 'SOURCE'
+    $dstOk = Test-Connectivity -Manager $DestNSX   -Headers $DstHeaders -Label 'DESTINATION'
+    if (-not $srcOk -or -not $dstOk) {
+        Write-Log "Connectivity check failed. Aborting." ERROR
+        exit 1
+    }
+
+    if ($CompareIPSets)   { Compare-IPSets   }
+    if ($CompareServices) { Compare-Services }
+    if ($CompareGroups)   { Compare-Groups   }
+    if ($ComparePolicies) { Compare-Policies }
+
+    Write-Log "" INFO
+    Write-Log "════════════════════════════════════════════════════════════════════" INFO
+    Write-Log " GENERATING REPORTS" INFO
+    Write-Log "════════════════════════════════════════════════════════════════════" INFO
+
+    $csvPath  = Export-CsvReport
+    $htmlPath = Export-HtmlReport -CsvPath $csvPath
+
+} catch {
+    Write-Log "FATAL ERROR: $_" ERROR
+    $Stats.Errors++
+    exit 1
+} finally {
+    # Totals
+    $totalMatch      = ($Stats.IPSets_Match + $Stats.Services_Match + $Stats.SvcGroups_Match + $Stats.Groups_Match + $Stats.Policies_Match + $Stats.Rules_Match)
+    $totalMismatch   = ($Stats.IPSets_Mismatch + $Stats.Services_Mismatch + $Stats.SvcGroups_Mismatch + $Stats.Groups_Mismatch + $Stats.Policies_Mismatch + $Stats.Rules_Mismatch)
+    $totalMissingDst = ($Stats.IPSets_MissingDst + $Stats.Services_MissingDst + $Stats.SvcGroups_MissingDst + $Stats.Groups_MissingDst + $Stats.Policies_MissingDst + $Stats.Rules_MissingDst)
+    $totalMissingSrc = ($Stats.IPSets_MissingSrc + $Stats.Services_MissingSrc + $Stats.SvcGroups_MissingSrc + $Stats.Groups_MissingSrc + $Stats.Policies_MissingSrc + $Stats.Rules_MissingSrc)
+    $overallStatus   = if ($totalMismatch -eq 0 -and $totalMissingDst -eq 0) { 'PASSED ✔' } else { 'ISSUES FOUND ⚠' }
+
+    Write-Log "" INFO
+    Write-Log "════════════════════════════════════════════════════════════════════" INFO
+    Write-Log " VALIDATION SUMMARY" INFO
+    Write-Log "────────────────────────────────────────────────────────────────────" INFO
+    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10}" -f 'Object Type','Match','Mismatch','Missing Dst','Extra Dst') INFO
+    Write-Log "  ─────────────────────────────────────────────────────────────────" INFO
+    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10}" -f 'IP Sets',$Stats.IPSets_Match,$Stats.IPSets_Mismatch,$Stats.IPSets_MissingDst,$Stats.IPSets_MissingSrc) INFO
+    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10}" -f 'Services',$Stats.Services_Match,$Stats.Services_Mismatch,$Stats.Services_MissingDst,$Stats.Services_MissingSrc) INFO
+    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10}" -f 'Service Groups',$Stats.SvcGroups_Match,$Stats.SvcGroups_Mismatch,$Stats.SvcGroups_MissingDst,$Stats.SvcGroups_MissingSrc) INFO
+    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10}" -f 'Security Groups',$Stats.Groups_Match,$Stats.Groups_Mismatch,$Stats.Groups_MissingDst,$Stats.Groups_MissingSrc) INFO
+    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10}" -f 'DFW Policies',$Stats.Policies_Match,$Stats.Policies_Mismatch,$Stats.Policies_MissingDst,$Stats.Policies_MissingSrc) INFO
+    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10}" -f 'DFW Rules',$Stats.Rules_Match,$Stats.Rules_Mismatch,$Stats.Rules_MissingDst,$Stats.Rules_MissingSrc) INFO
+    Write-Log "  ─────────────────────────────────────────────────────────────────" INFO
+    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10}" -f 'TOTAL',$totalMatch,$totalMismatch,$totalMissingDst,$totalMissingSrc) INFO
+    Write-Log "────────────────────────────────────────────────────────────────────" INFO
+    Write-Log "  Overall Status : $overallStatus" INFO
+    Write-Log "  Errors         : $($Stats.Errors)" INFO
+    Write-Log "────────────────────────────────────────────────────────────────────" INFO
+    Write-Log "  Output folder  : $OutputFolder" INFO
+    Write-Log "════════════════════════════════════════════════════════════════════" INFO
+}
