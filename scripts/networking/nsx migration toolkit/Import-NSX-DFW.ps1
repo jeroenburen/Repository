@@ -1,4 +1,4 @@
-﻿# Version 1.5.0
+﻿# Version 1.6.0
 <#
 .SYNOPSIS
     STEP 2 of 2 — Imports NSX Distributed Firewall objects from CSV files into NSX 9.
@@ -20,9 +20,10 @@
 
     FILE RESOLUTION
     ---------------
-    For each enabled import type a standard Windows file browser dialog opens,
-    filtered to CSV files and starting in -InputFolder. Select the file to use
-    — original exports, sanitized files, or any renamed variant all work.
+    All required CSV file dialogs open upfront at the start of the script,
+    before any import work begins, based on the -Import* flags you specified.
+    A standard Windows file browser dialog opens for each enabled import type,
+    filtered to CSV files and starting in -InputFolder.
 
     The dialog aborts with an error if:
       - The dialog is cancelled without selecting a file
@@ -104,6 +105,12 @@
       1.4.0  Replaced Out-GridView picker with a standard Windows file browser
              dialog (System.Windows.Forms.OpenFileDialog), filtered to CSV files
              and starting in -InputFolder.
+      1.5.0  (previous release)
+      1.6.0  All CSV file dialogs now open upfront at script start (after
+             credentials), based on selected -Import* parameters, before any
+             import work or NSX connectivity check begins. Each Import-* function
+             now consumes the pre-resolved path variable instead of calling
+             Resolve-CsvFile itself.
 #>
 
 [CmdletBinding(SupportsShouldProcess)]
@@ -124,7 +131,7 @@ param(
     [string]$LogTarget = 'Screen'
 )
 
-$ScriptVersion = '1.5.0'
+$ScriptVersion = '1.6.0'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -240,8 +247,39 @@ function Resolve-CsvFile {
 }
 
 # ─────────────────────────────────────────────────────────────
-# REST HELPERS
+# UPFRONT CSV FILE SELECTION
+#
+# All required file dialogs open here, before any import work
+# begins, so the user can select every CSV file at once.
+# Each path is stored in a script-scoped variable consumed
+# later by the corresponding Import-* function.
 # ─────────────────────────────────────────────────────────────
+Write-Log "════════════════════════════════════════════" INFO
+Write-Log " FILE SELECTION — select all CSV files now" INFO
+Write-Log "════════════════════════════════════════════" INFO
+
+$Script:CsvPath_IPSets       = $null
+$Script:CsvPath_Services     = $null
+$Script:CsvPath_ServiceGroups = $null
+$Script:CsvPath_Groups       = $null
+$Script:CsvPath_Policies     = $null
+$Script:CsvPath_Rules        = $null
+$Script:CsvPath_Tags         = $null
+
+if ($ImportIPSets)        { $Script:CsvPath_IPSets        = Resolve-CsvFile -Label 'IP Sets'        }
+if ($ImportServices)      { $Script:CsvPath_Services      = Resolve-CsvFile -Label 'Services'        }
+if ($ImportServiceGroups) { $Script:CsvPath_ServiceGroups = Resolve-CsvFile -Label 'Service Groups'  }
+if ($ImportGroups)        { $Script:CsvPath_Groups        = Resolve-CsvFile -Label 'Security Groups' }
+if ($ImportPolicies) {
+    $Script:CsvPath_Policies = Resolve-CsvFile -Label 'DFW Policies'
+    $Script:CsvPath_Rules    = Resolve-CsvFile -Label 'DFW Rules'
+}
+if ($ImportTags)          { $Script:CsvPath_Tags          = Resolve-CsvFile -Label 'VM Tags'         }
+
+Write-Log " All CSV files selected — proceeding with import." INFO
+Write-Log "════════════════════════════════════════════" INFO
+
+
 function Invoke-NSXGet {
     param([string]$Path)
     $uri = "https://$NSXManager$Path"
@@ -308,7 +346,7 @@ $Stats = @{ IPSets=0; Services=0; ServiceGroups=0; Groups=0; Policies=0; Rules=0
 # ═════════════════════════════════════════════════════════════
 function Import-IPSets {
     Write-Log "━━━ Importing IP Sets ━━━" INFO
-    $csvPath = Resolve-CsvFile -Label 'IP Sets'
+    $csvPath = $Script:CsvPath_IPSets
     $rows    = Read-CsvFile -ResolvedPath $csvPath -Label 'IP Sets'
     if (-not $rows) { return }
 
@@ -412,12 +450,12 @@ function Import-Services {
     $sgRows  = @()
 
     if ($ImportServices) {
-        $svcPath = Resolve-CsvFile -Label 'Services'
+        $svcPath = $Script:CsvPath_Services
         $svcRows = @(Read-CsvFile -ResolvedPath $svcPath -Label 'Services')
     }
 
     if ($ImportServiceGroups) {
-        $sgPath = Resolve-CsvFile -Label 'Service Groups'
+        $sgPath = $Script:CsvPath_ServiceGroups
         $sgRows = @(Read-CsvFile -ResolvedPath $sgPath -Label 'Service Groups')
     }
 
@@ -526,7 +564,7 @@ function Sort-GroupsByDependency {
 
 function Import-Groups {
     Write-Log "━━━ Importing Security Groups ━━━" INFO
-    $csvPath = Resolve-CsvFile -Label 'Security Groups'
+    $csvPath = $Script:CsvPath_Groups
     $rows    = Read-CsvFile -ResolvedPath $csvPath -Label 'Security Groups'
     if (-not $rows) { return }
 
@@ -556,8 +594,8 @@ function Import-Groups {
 function Import-Policies {
     Write-Log "━━━ Importing DFW Policies ━━━" INFO
 
-    $polCsvPath  = Resolve-CsvFile -Label 'DFW Policies'
-    $ruleCsvPath = Resolve-CsvFile -Label 'DFW Rules'
+    $polCsvPath  = $Script:CsvPath_Policies
+    $ruleCsvPath = $Script:CsvPath_Rules
     $policyRows  = Read-CsvFile -ResolvedPath $polCsvPath  -Label 'DFW Policies'
     $ruleRows    = Read-CsvFile -ResolvedPath $ruleCsvPath -Label 'DFW Rules'
 
@@ -612,7 +650,7 @@ function Import-Tags {
     Write-Log "━━━ Importing VM Tags ━━━" INFO
     Write-Log "  NOTE: VMs must already exist in the destination NSX/vCenter inventory." WARN
 
-    $csvPath = Resolve-CsvFile -Label 'VM Tags'
+    $csvPath = $Script:CsvPath_Tags
     $rows    = Read-CsvFile -ResolvedPath $csvPath -Label 'VM Tags'
     if (-not $rows) { return }
 
@@ -673,10 +711,13 @@ Write-Log " Input folder: $InputFolder" INFO
 Write-Log " Conflict    : $ConflictAction" INFO
 Write-Log " Domain      : $DomainId" INFO
 Write-Log "════════════════════════════════════════════" INFO
+Write-Log " Import IP Sets      : $ImportIPSets" INFO
 Write-Log " Import Services     : $ImportServices" INFO
 Write-Log " Import Svc Groups   : $ImportServiceGroups" INFO
-Write-Log " File resolution: Windows file dialog opens for" INFO
-Write-Log " each enabled import type (filtered to CSV files)." INFO
+Write-Log " Import Groups       : $ImportGroups" INFO
+Write-Log " Import Policies     : $ImportPolicies" INFO
+Write-Log " Import Tags         : $ImportTags" INFO
+Write-Log " CSV files are selected upfront before import starts." INFO
 Write-Log "════════════════════════════════════════════" INFO
 
 try {
