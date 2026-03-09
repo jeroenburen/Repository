@@ -1,4 +1,4 @@
-﻿# Version 1.4.0
+﻿# Version 1.5.0
 <#
 .SYNOPSIS
     STEP 2 of 2 — Imports NSX Distributed Firewall objects from CSV files into NSX 9.
@@ -8,10 +8,15 @@
     Sanitize-NSX.ps1) and creates/updates objects on an NSX 9 Manager via the
     Policy REST API. Import order respects dependencies:
       1. IP Sets
-      2. Services & Service Groups
+      2. Services (plain) and/or Service Groups — each independently controllable
       3. Security Groups
       4. DFW Policies + Rules
       5. VM Tags
+
+    Services and Service Groups are imported in a single dependency-ordered pass
+    when both flags are enabled, ensuring service groups are always created after
+    the plain services they reference. When only one flag is set, only that CSV
+    file is requested and processed.
 
     FILE RESOLUTION
     ---------------
@@ -41,7 +46,12 @@
     Import IP Sets. Default: $false
 
 .PARAMETER ImportServices
-    Import Services and Service Groups. Default: $false
+    Import plain Services (NSX_Services.csv). Default: $false
+
+.PARAMETER ImportServiceGroups
+    Import Service Groups (NSX_ServiceGroups.csv). Default: $false
+    Set this independently of -ImportServices when the source environment
+    has no service groups and the CSV does not exist.
 
 .PARAMETER ImportGroups
     Import Security Groups. Default: $false
@@ -74,6 +84,11 @@
         -InputFolder .\NSX_DFW_Export_20250101_120000 `
         -ImportGroups $true -ImportPolicies $true -WhatIf
 
+.EXAMPLE
+    # Import plain services only — no service groups in source environment
+    .\Import-NSX-DFW.ps1 -NSXManager nsx9.corp.local `
+        -InputFolder .\NSX_DFW_Export_20250101_120000 `
+        -ImportServices $true
 .NOTES
     Changelog:
       1.0.0  Initial release.
@@ -100,6 +115,7 @@ param(
     [string]$DomainId         = 'default',
     [bool]$ImportIPSets       = $false,
     [bool]$ImportServices     = $false,
+    [bool]$ImportServiceGroups = $false,
     [bool]$ImportGroups       = $false,
     [bool]$ImportPolicies     = $false,
     [bool]$ImportTags         = $false,
@@ -108,7 +124,7 @@ param(
     [string]$LogTarget = 'Screen'
 )
 
-$ScriptVersion = '1.4.0'
+$ScriptVersion = '1.5.0'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -383,16 +399,36 @@ function Sort-ServicesByDependency {
 }
 
 function Import-Services {
-    Write-Log "━━━ Importing Services & Service Groups ━━━" INFO
+    # Determine which types are active and build a meaningful header label
+    $typeLabel = switch ($true) {
+        ($ImportServices -and $ImportServiceGroups) { 'Services & Service Groups' }
+        $ImportServices                             { 'Services' }
+        $ImportServiceGroups                        { 'Service Groups' }
+    }
+    Write-Log "━━━ Importing $typeLabel ━━━" INFO
 
-    $svcPath = Resolve-CsvFile -Label 'Services'
-    $sgPath  = Resolve-CsvFile -Label 'Service Groups'
-    $svcRows = Read-CsvFile -ResolvedPath $svcPath -Label 'Services'
-    $sgRows  = Read-CsvFile -ResolvedPath $sgPath  -Label 'Service Groups'
+    # Only open the file picker for types that are enabled
+    $svcRows = @()
+    $sgRows  = @()
+
+    if ($ImportServices) {
+        $svcPath = Resolve-CsvFile -Label 'Services'
+        $svcRows = @(Read-CsvFile -ResolvedPath $svcPath -Label 'Services')
+    }
+
+    if ($ImportServiceGroups) {
+        $sgPath = Resolve-CsvFile -Label 'Service Groups'
+        $sgRows = @(Read-CsvFile -ResolvedPath $sgPath -Label 'Service Groups')
+    }
+
+    if (-not $svcRows -and -not $sgRows) {
+        Write-Log "  No rows loaded — nothing to import." WARN
+        return
+    }
 
     Write-Log "  Resolving service dependency order..." INFO
-    $orderedRows = Sort-ServicesByDependency -ServiceRows @($svcRows) -ServiceGroupRows @($sgRows)
-    Write-Log "  Import order resolved for $(@($orderedRows).Count) services/service groups." INFO
+    $orderedRows = Sort-ServicesByDependency -ServiceRows $svcRows -ServiceGroupRows $sgRows
+    Write-Log "  Import order resolved for $(@($orderedRows).Count) item(s)." INFO
 
     foreach ($row in $orderedRows) {
         $id         = $row.Id
@@ -623,7 +659,7 @@ function Import-Tags {
 # ═════════════════════════════════════════════════════════════
 # MAIN
 # ═════════════════════════════════════════════════════════════
-$anyAction = $ImportIPSets -or $ImportServices -or $ImportGroups -or $ImportPolicies -or $ImportTags
+$anyAction = $ImportIPSets -or $ImportServices -or $ImportServiceGroups -or $ImportGroups -or $ImportPolicies -or $ImportTags
 if (-not $anyAction) {
     Write-Log "No import actions selected. Specify at least one -Import* flag." WARN
     Write-Log "Example: -ImportPolicies `$true -ImportGroups `$true" WARN
@@ -637,6 +673,8 @@ Write-Log " Input folder: $InputFolder" INFO
 Write-Log " Conflict    : $ConflictAction" INFO
 Write-Log " Domain      : $DomainId" INFO
 Write-Log "════════════════════════════════════════════" INFO
+Write-Log " Import Services     : $ImportServices" INFO
+Write-Log " Import Svc Groups   : $ImportServiceGroups" INFO
 Write-Log " File resolution: Windows file dialog opens for" INFO
 Write-Log " each enabled import type (filtered to CSV files)." INFO
 Write-Log "════════════════════════════════════════════" INFO
@@ -647,11 +685,11 @@ try {
     if ($info) { Write-Log "  Connected: NSX $($info.product_version)" SUCCESS }
     else        { throw "Cannot connect to NSX Manager $NSXManager." }
 
-    if ($ImportIPSets)   { Import-IPSets   }
-    if ($ImportServices) { Import-Services }
-    if ($ImportGroups)   { Import-Groups   }
-    if ($ImportPolicies) { Import-Policies }
-    if ($ImportTags)     { Import-Tags     }
+    if ($ImportIPSets)                            { Import-IPSets   }
+    if ($ImportServices -or $ImportServiceGroups) { Import-Services }
+    if ($ImportGroups)                            { Import-Groups   }
+    if ($ImportPolicies)                          { Import-Policies }
+    if ($ImportTags)                              { Import-Tags     }
 
 } catch {
     Write-Log "FATAL: $_" ERROR
