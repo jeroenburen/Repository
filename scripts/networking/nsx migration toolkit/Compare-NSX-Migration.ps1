@@ -109,7 +109,7 @@
         -OutputFolder C:\Reports\Migration -LogTarget Both
 
 .NOTES
-    Version : 1.3.7
+    Version : 1.3.8
     Changelog:
       1.0.0  Initial release.
       1.0.1  Fixed Build-Map: replaced $_ with $obj inside foreach loop ($_ is
@@ -197,9 +197,9 @@
              inside every compare scriptblock with '& $SafeProp'. Applied
              .GetNewClosure() to all six Compare-ObjectSets call sites.
       1.3.7  Fixed 'expression after & produced an object that was not valid'.
-             '& $SafeProp $x $y | pipeline' is invalid — PowerShell cannot use
+             '(if ($x.PSObject.Properties[$y]) { $x.$($y) } else { $null }) | pipeline' is invalid — PowerShell cannot use
              & as a pipeline source element. Wrapped all such calls in @() so
-             they become '@(& $SafeProp $x $y) | pipeline'.
+             they become '@((if ($x.PSObject.Properties[$y]) { $x.$($y) } else { $null })) | pipeline'.
 #>
 
 [CmdletBinding()]
@@ -220,7 +220,7 @@ param(
     [string]$ServiceMappingFile = ''
 )
 
-$ScriptVersion = '1.3.7'
+$ScriptVersion = '1.3.8'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -391,10 +391,6 @@ function Get-SafeProp {
     if ($Obj.PSObject.Properties[$Name]) { return $Obj.$Name }
     return $null
 }
-# Scriptblock alias for Get-SafeProp — captured via .GetNewClosure() into
-# compare scriptblocks that are invoked with & from a child scope where
-# script-level functions are not visible.
-$SafeProp = { param($Obj,$Name); if ($null -eq $Obj) { return $null }; if ($Obj.PSObject.Properties[$Name]) { return $Obj.$Name }; return $null }
 
 function Format-Tags {
     param([object]$Obj)
@@ -558,8 +554,8 @@ function Compare-IPSets {
         }
 
         # IP addresses (order-insensitive)
-        $srcIPs = @(@(& $SafeProp $src 'ip_addresses') | Sort-Object)
-        $dstIPs = @(@(& $SafeProp $dst 'ip_addresses') | Sort-Object)
+        $srcIPs = @(@((if ($src.PSObject.Properties['ip_addresses']) { $src.'ip_addresses' } else { $null })) | Sort-Object)
+        $dstIPs = @(@((if ($dst.PSObject.Properties['ip_addresses']) { $dst.'ip_addresses' } else { $null })) | Sort-Object)
         $added   = $dstIPs | Where-Object { $_ -notin $srcIPs }
         $removed = $srcIPs | Where-Object { $_ -notin $dstIPs }
         if ($added)   { $diffs += "addresses added on dst: $($added -join ', ')" }
@@ -613,8 +609,8 @@ function Compare-Services {
             }
         }
 
-        $srcEntries = @(& $SafeProp $src 'service_entries')
-        $dstEntries = @(& $SafeProp $dst 'service_entries')
+        $srcEntries = @((if ($src.PSObject.Properties['service_entries']) { $src.'service_entries' } else { $null }))
+        $dstEntries = @((if ($dst.PSObject.Properties['service_entries']) { $dst.'service_entries' } else { $null }))
         if ($srcEntries.Count -ne $dstEntries.Count) {
             $diffs += "service_entries count: $($srcEntries.Count) → $($dstEntries.Count)"
         } else {
@@ -622,16 +618,16 @@ function Compare-Services {
             # differences between source and destination do not cause false mismatches.
             function Get-EntryKey {
                 param($entry)
-                $rt    = & $SafeProp $entry 'resource_type'
-                $proto = & $SafeProp $entry 'l4_protocol'
-                $dport = if ((& $SafeProp $entry 'destination_ports') -is [array]) {
-                             (@(& $SafeProp $entry 'destination_ports') | Sort-Object) -join ','
-                         } else { "$(& $SafeProp $entry 'destination_ports')" }
-                $sport = if ((& $SafeProp $entry 'source_ports') -is [array]) {
-                             (@(& $SafeProp $entry 'source_ports') | Sort-Object) -join ','
-                         } else { "$(& $SafeProp $entry 'source_ports')" }
-                $icmp  = & $SafeProp $entry 'icmp_type'
-                $pnum  = & $SafeProp $entry 'protocol_number'
+                $rt    = (if ($entry.PSObject.Properties['resource_type']) { $entry.'resource_type' } else { $null })
+                $proto = (if ($entry.PSObject.Properties['l4_protocol']) { $entry.'l4_protocol' } else { $null })
+                $dport = if (((if ($entry.PSObject.Properties['destination_ports']) { $entry.'destination_ports' } else { $null })) -is [array]) {
+                             (@((if ($entry.PSObject.Properties['destination_ports']) { $entry.'destination_ports' } else { $null })) | Sort-Object) -join ','
+                         } else { "$((if ($entry.PSObject.Properties['destination_ports']) { $entry.'destination_ports' } else { $null }))" }
+                $sport = if (((if ($entry.PSObject.Properties['source_ports']) { $entry.'source_ports' } else { $null })) -is [array]) {
+                             (@((if ($entry.PSObject.Properties['source_ports']) { $entry.'source_ports' } else { $null })) | Sort-Object) -join ','
+                         } else { "$((if ($entry.PSObject.Properties['source_ports']) { $entry.'source_ports' } else { $null }))" }
+                $icmp  = (if ($entry.PSObject.Properties['icmp_type']) { $entry.'icmp_type' } else { $null })
+                $pnum  = (if ($entry.PSObject.Properties['protocol_number']) { $entry.'protocol_number' } else { $null })
                 return "$rt|$proto|$dport|$sport|$icmp|$pnum"
             }
 
@@ -645,7 +641,7 @@ function Compare-Services {
                     $diffs += "entry[$i] resource_type: $($se.resource_type) → $($de.resource_type)"
                 }
                 foreach ($f in @('l4_protocol','destination_ports','source_ports','icmp_type','protocol_number')) {
-                    $sv = & $SafeProp $se $f; $dv = & $SafeProp $de $f
+                    $sv = (if ($se.PSObject.Properties[$f]) { $se.$($f) } else { $null }); $dv = (if ($de.PSObject.Properties[$f]) { $de.$($f) } else { $null })
                     $svStr = if ($sv -is [array]) { ($sv | Sort-Object) -join ',' } else { "$sv" }
                     $dvStr = if ($dv -is [array]) { ($dv | Sort-Object) -join ',' } else { "$dv" }
                     if ($svStr -ne $dvStr) {
@@ -672,8 +668,8 @@ function Compare-Services {
             }
         }
 
-        $srcMembers = @(@(& $SafeProp $src 'members') | ForEach-Object { $_.path } | Sort-Object)
-        $dstMembers = @(@(& $SafeProp $dst 'members') | ForEach-Object { $_.path } | Sort-Object)
+        $srcMembers = @(@((if ($src.PSObject.Properties['members']) { $src.'members' } else { $null })) | ForEach-Object { $_.path } | Sort-Object)
+        $dstMembers = @(@((if ($dst.PSObject.Properties['members']) { $dst.'members' } else { $null })) | ForEach-Object { $_.path } | Sort-Object)
         $added   = $dstMembers | Where-Object { $_ -notin $srcMembers }
         $removed = $srcMembers | Where-Object { $_ -notin $dstMembers }
         if ($added)   { $diffs += "members added on dst: $($added -join ', ')" }
@@ -837,7 +833,7 @@ function Compare-Policies {
         $diffs = @()
         if ($src.display_name -ne $dst.display_name) { $diffs += "display_name: '$($src.display_name)' → '$($dst.display_name)'" }
         foreach ($f in @('category','sequence_number')) {
-            $sv = & $SafeProp $src $f; $dv = & $SafeProp $dst $f
+            $sv = (if ($src.PSObject.Properties[$f]) { $src.$($f) } else { $null }); $dv = (if ($dst.PSObject.Properties[$f]) { $dst.$($f) } else { $null })
             if ("$sv" -ne "$dv") { $diffs += "${f}: '$sv' → '$dv'" }
         }
         if ($diffs.Count -eq 0) { return @{ Equal=$true; Detail='' } }
@@ -857,11 +853,11 @@ function Compare-Policies {
         $diffs = @()
         if ($src.display_name -ne $dst.display_name) { $diffs += "display_name: '$($src.display_name)' → '$($dst.display_name)'" }
         foreach ($f in @('action','direction','ip_protocol','disabled','logged','sequence_number')) {
-            $sv = & $SafeProp $src $f; $dv = & $SafeProp $dst $f
+            $sv = (if ($src.PSObject.Properties[$f]) { $src.$($f) } else { $null }); $dv = (if ($dst.PSObject.Properties[$f]) { $dst.$($f) } else { $null })
             if ("$sv" -ne "$dv") { $diffs += "${f}: '$sv' → '$dv'" }
         }
         foreach ($listField in @('sources_excluded','destinations_excluded')) {
-            $sv = & $SafeProp $src $listField; $dv = & $SafeProp $dst $listField
+            $sv = (if ($src.PSObject.Properties[$listField]) { $src.$($listField) } else { $null }); $dv = (if ($dst.PSObject.Properties[$listField]) { $dst.$($listField) } else { $null })
             if ("$sv" -ne "$dv") { $diffs += "${listField}: '$sv' → '$dv'" }
         }
         if ($diffs.Count -eq 0) { return @{ Equal=$true; Detail='' } }
@@ -921,18 +917,18 @@ function Compare-Profiles {
 
         # Compare attributes (order-insensitive).
         # Each attribute has a 'key' and a 'value' array. Build canonical key=value strings and compare as sets.
-        $srcAttrs = @(& $SafeProp $src 'attributes')
-        $dstAttrs = @(& $SafeProp $dst 'attributes')
+        $srcAttrs = @((if ($src.PSObject.Properties['attributes']) { $src.'attributes' } else { $null }))
+        $dstAttrs = @((if ($dst.PSObject.Properties['attributes']) { $dst.'attributes' } else { $null }))
 
         $srcAttrKeys = @($srcAttrs | ForEach-Object {
-            $k = & $SafeProp $_ 'key'
-            $v = (@(& $SafeProp $_ 'value') | Sort-Object) -join ','
+            $k = (if ($_.PSObject.Properties['key']) { $_.'key' } else { $null })
+            $v = (@((if ($_.PSObject.Properties['value']) { $_.'value' } else { $null })) | Sort-Object) -join ','
             "$k=$v"
         } | Sort-Object)
 
         $dstAttrKeys = @($dstAttrs | ForEach-Object {
-            $k = & $SafeProp $_ 'key'
-            $v = (@(& $SafeProp $_ 'value') | Sort-Object) -join ','
+            $k = (if ($_.PSObject.Properties['key']) { $_.'key' } else { $null })
+            $v = (@((if ($_.PSObject.Properties['value']) { $_.'value' } else { $null })) | Sort-Object) -join ','
             "$k=$v"
         } | Sort-Object)
 
