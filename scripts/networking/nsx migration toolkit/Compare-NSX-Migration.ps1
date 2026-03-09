@@ -109,7 +109,7 @@
         -OutputFolder C:\Reports\Migration -LogTarget Both
 
 .NOTES
-    Version : 1.3.6
+    Version : 1.3.7
     Changelog:
       1.0.0  Initial release.
       1.0.1  Fixed Build-Map: replaced $_ with $obj inside foreach loop ($_ is
@@ -196,6 +196,10 @@
              captured by .GetNewClosure(). Replaced all Get-SafeProp calls
              inside every compare scriptblock with '& $SafeProp'. Applied
              .GetNewClosure() to all six Compare-ObjectSets call sites.
+      1.3.7  Fixed 'expression after & produced an object that was not valid'.
+             '& $SafeProp $x $y | pipeline' is invalid — PowerShell cannot use
+             & as a pipeline source element. Wrapped all such calls in @() so
+             they become '@(& $SafeProp $x $y) | pipeline'.
 #>
 
 [CmdletBinding()]
@@ -216,7 +220,7 @@ param(
     [string]$ServiceMappingFile = ''
 )
 
-$ScriptVersion = '1.3.6'
+$ScriptVersion = '1.3.7'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -554,8 +558,8 @@ function Compare-IPSets {
         }
 
         # IP addresses (order-insensitive)
-        $srcIPs = @(& $SafeProp $src 'ip_addresses' | Sort-Object)
-        $dstIPs = @(& $SafeProp $dst 'ip_addresses' | Sort-Object)
+        $srcIPs = @(@(& $SafeProp $src 'ip_addresses') | Sort-Object)
+        $dstIPs = @(@(& $SafeProp $dst 'ip_addresses') | Sort-Object)
         $added   = $dstIPs | Where-Object { $_ -notin $srcIPs }
         $removed = $srcIPs | Where-Object { $_ -notin $dstIPs }
         if ($added)   { $diffs += "addresses added on dst: $($added -join ', ')" }
@@ -621,10 +625,10 @@ function Compare-Services {
                 $rt    = & $SafeProp $entry 'resource_type'
                 $proto = & $SafeProp $entry 'l4_protocol'
                 $dport = if ((& $SafeProp $entry 'destination_ports') -is [array]) {
-                             (& $SafeProp $entry 'destination_ports' | Sort-Object) -join ','
+                             (@(& $SafeProp $entry 'destination_ports') | Sort-Object) -join ','
                          } else { "$(& $SafeProp $entry 'destination_ports')" }
                 $sport = if ((& $SafeProp $entry 'source_ports') -is [array]) {
-                             (& $SafeProp $entry 'source_ports' | Sort-Object) -join ','
+                             (@(& $SafeProp $entry 'source_ports') | Sort-Object) -join ','
                          } else { "$(& $SafeProp $entry 'source_ports')" }
                 $icmp  = & $SafeProp $entry 'icmp_type'
                 $pnum  = & $SafeProp $entry 'protocol_number'
@@ -668,8 +672,8 @@ function Compare-Services {
             }
         }
 
-        $srcMembers = @(& $SafeProp $src 'members' | ForEach-Object { $_.path } | Sort-Object)
-        $dstMembers = @(& $SafeProp $dst 'members' | ForEach-Object { $_.path } | Sort-Object)
+        $srcMembers = @(@(& $SafeProp $src 'members') | ForEach-Object { $_.path } | Sort-Object)
+        $dstMembers = @(@(& $SafeProp $dst 'members') | ForEach-Object { $_.path } | Sort-Object)
         $added   = $dstMembers | Where-Object { $_ -notin $srcMembers }
         $removed = $srcMembers | Where-Object { $_ -notin $dstMembers }
         if ($added)   { $diffs += "members added on dst: $($added -join ', ')" }
