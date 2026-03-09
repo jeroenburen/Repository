@@ -67,9 +67,14 @@
         -OutputFolder C:\Reports\Migration -LogTarget Both
 
 .NOTES
-    Version : 1.0.0
+    Version : 1.0.1
     Changelog:
       1.0.0  Initial release.
+      1.0.1  Fixed Build-Map: replaced $_ with $obj inside foreach loop ($_ is
+             not set in a foreach, only in ForEach-Object / Where-Object pipelines).
+             Also fixed inverted filter logic — system-owned objects were being
+             kept and custom objects skipped, causing all comparisons to return
+             empty results and the $_ access to throw under Set-StrictMode.
 #>
 
 [CmdletBinding()]
@@ -87,7 +92,7 @@ param(
     [bool]$ComparePolicies   = $true
 )
 
-$ScriptVersion = '1.0.0'
+$ScriptVersion = '1.0.1'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -320,7 +325,7 @@ function Build-Map {
     param([object[]]$Objects)
     $map = @{}
     foreach ($obj in $Objects) {
-        if ((Get-SafeProp $_ '_system_owned') -ne $true -and (Get-SafeProp $_ '_create_user') -ne 'system' -and $_.id -notin $pseudoSystemIds) { continue }
+        if ((Get-SafeProp $obj '_system_owned') -eq $true -or (Get-SafeProp $obj '_create_user') -eq 'system' -or $obj.id -in $pseudoSystemIds) { continue }
         $id = Get-SafeProp $obj 'id'
         if ($id) { $map[$id] = $obj }
     }
