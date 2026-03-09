@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # Sanitize-NSXFirewallRules.ps1
-# Version 1.1.0
+# Version 1.2.0
 #
 # PURPOSE
 # -------
@@ -11,6 +11,10 @@
 # After Sanitize-NSXGroups.ps1 renames group Ids to match DisplayNames, those
 # paths in both the rules and policies exports become stale. This script
 # applies the same Id mapping to both exports so all references stay consistent.
+#
+# When -ServiceIdMap is provided (passed from the orchestrator after Step 2),
+# service Id references in rule rows are also updated to match the renamed
+# service Ids produced by Sanitize-NSXServices.ps1.
 #
 # WHAT GETS CHANGED — RULES (NSX_Rules.csv)
 # ------------------------------------------
@@ -28,6 +32,14 @@
 #     - scope[]               — same semantics as AppliedTo column
 #     - "tags":[...]          — replaced with "tags":[]
 #
+# When -ServiceIdMap is provided, service Id references are also updated in:
+#
+#   CSV columns:
+#     - Services      — the service path(s) for the rule, or "ANY"
+#
+#   Inside RawJson:
+#     - services[]    — same semantics as the Services column
+#
 # WHAT GETS CHANGED — POLICIES (NSX_Policies.csv)
 # -------------------------------------------------
 # DFW policies can be scoped to specific groups via their applied-to / scope
@@ -41,7 +53,7 @@
 #     - scope[]       — same semantics as Scope column
 #     - "tags":[...]  — replaced with "tags":[]
 #
-# Values of "ANY" and empty fields in group columns are left untouched.
+# Values of "ANY" and empty fields in group/service columns are left untouched.
 #
 # TAG REMOVAL
 # -----------
@@ -51,8 +63,8 @@
 #
 # WHAT DOES NOT GET CHANGED
 # -------------------------
-# This script only updates group references. Rule Ids, policy Ids, service
-# paths (/infra/services/...), and all other fields are left as-is.
+# Rule Ids, policy Ids, and all fields not explicitly listed above are left
+# as-is.
 #
 # USAGE
 # -----
@@ -61,18 +73,19 @@
 #                                   -PoliciesFile "policies.csv" `
 #                                   -MappingFile  "groups_id_mapping.csv"
 #
-#   # Called from Sanitize-NSX.ps1 orchestrator — receives the live hashtable
+#   # Called from Sanitize-NSX.ps1 orchestrator — receives the live hashtables
 #   # directly, no intermediate file needed:
 #   .\Sanitize-NSXFirewallRules.ps1 -RulesFile    "rules.csv"    `
 #                                   -PoliciesFile  "policies.csv" `
-#                                   -IdMap         $idMap
+#                                   -IdMap         $groupIdMap    `
+#                                   -ServiceIdMap  $serviceIdMap
 #
 #   # Rules only (policies file omitted — backward-compatible):
 #   .\Sanitize-NSXFirewallRules.ps1 -RulesFile "rules.csv" -IdMap $idMap
 #
 # EXTENDING TO OTHER EXPORT TYPES
 # --------------------------------
-# If you need to sanitize another export type (e.g. segments, services),
+# If you need to sanitize another export type (e.g. segments),
 # create a Sanitize-NSX<Type>.ps1 following the same pattern:
 #   - Accept -IdMap <hashtable> and -MappingFile <path> parameters
 #   - Use Update-GroupPaths to rewrite /groups/<oldId> segments
@@ -93,7 +106,12 @@ param(
 
     # ...or a path to the mapping CSV produced by Sanitize-NSXGroups.ps1
     # (for standalone use when running this script independently).
-    [string]$MappingFile
+    [string]$MappingFile,
+
+    # Optional — service ID mapping hashtable produced by Sanitize-NSXServices.ps1.
+    # When provided, /services/<oldId> path segments in rule rows are rewritten
+    # to match the renamed service Ids. Defaults to empty (no service rewriting).
+    [hashtable]$ServiceIdMap = @{}
 )
 
 # Derive default PoliciesOut now that we know PoliciesFile
@@ -190,6 +208,29 @@ function Remove-Tags {
     return [regex]::Replace($json, '"tags":\[.*?\]', '"tags":[]')
 }
 
+# Rewrite /services/<oldId> path segments anywhere in a string.
+# Mirrors Update-GroupPaths but targets /services/ instead of /groups/.
+# Only runs when $ServiceIdMap is non-empty.
+function Update-ServicePaths {
+    param([string]$text)
+    if ($ServiceIdMap.Count -eq 0) { return $text }
+    $sortedKeys = $ServiceIdMap.Keys | Sort-Object { $_.Length } -Descending
+    foreach ($oldId in $sortedKeys) {
+        $escaped = [regex]::Escape($oldId)
+        $text = [regex]::Replace($text, "(?<=/services/)$escaped(?=/|""|$)", $ServiceIdMap[$oldId])
+    }
+    return $text
+}
+
+# Update a single service-path column value (semicolon-separated paths, or "ANY").
+function Update-ServiceColumn {
+    param([string]$value)
+    if ([string]::IsNullOrWhiteSpace($value) -or $value -eq 'ANY') { return $value }
+    $parts   = $value -split ';' | ForEach-Object { $_.Trim() }
+    $updated = $parts | ForEach-Object { Update-ServicePaths -text $_ }
+    return $updated -join '; '
+}
+
 # ---------------------------------------------------------------------------
 # 3. Process rules CSV
 # ---------------------------------------------------------------------------
@@ -205,13 +246,16 @@ foreach ($row in $ruleRows) {
 
     $before = $row | ConvertTo-Json -Compress
 
-    $row.SourceGroups = Update-GroupColumn -value $row.SourceGroups
-    $row.DestGroups   = Update-GroupColumn -value $row.DestGroups
-    $row.AppliedTo    = Update-GroupColumn -value $row.AppliedTo
+    $row.SourceGroups = Update-GroupColumn   -value $row.SourceGroups
+    $row.DestGroups   = Update-GroupColumn   -value $row.DestGroups
+    $row.AppliedTo    = Update-GroupColumn   -value $row.AppliedTo
+    $row.Services     = Update-ServiceColumn -value $row.Services
 
     # RawJson contains the same group paths inside source_groups[],
     # destination_groups[], and scope[] — Update-GroupPaths handles all of them.
-    $row.RawJson = Update-GroupPaths -text $row.RawJson
+    # Update-ServicePaths rewrites /services/<oldId> segments in services[].
+    $row.RawJson = Update-GroupPaths   -text $row.RawJson
+    $row.RawJson = Update-ServicePaths -text $row.RawJson
 
     # Remove tags from RawJson and clear the Tags CSV column.
     $row.RawJson = Remove-Tags -json $row.RawJson
@@ -223,7 +267,7 @@ foreach ($row in $ruleRows) {
 
 Write-Host "  [Rules] Writing: $RulesOut" -ForegroundColor Cyan
 $ruleRows | Export-Csv -Path $RulesOut -NoTypeInformation -Encoding UTF8
-Write-Host "  [Rules] $rulesUpdated rule row(s) had group references updated." -ForegroundColor Yellow
+Write-Host "  [Rules] $rulesUpdated rule row(s) had group/service references updated." -ForegroundColor Yellow
 
 # ---------------------------------------------------------------------------
 # 4. Process policies CSV (optional)

@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # Sanitize-NSX.ps1  —  Orchestrator
-# Version 1.2.0
+# Version 1.3.0
 #
 # PURPOSE
 # -------
@@ -47,7 +47,8 @@
 #   - Also saves the mapping table to a CSV file for auditing.
 #
 # Step 3 — Sanitize-NSXFirewallRules.ps1
-#   - Receives the groups ID mapping table from Step 1.
+#   - Receives the groups ID mapping table from Step 1 and the service ID
+#     mapping table from Step 2 (empty hashtable when no services file given).
 #   - Processes both the rules CSV and the policies CSV:
 #
 #     Rules — group references appear in three dedicated CSV columns:
@@ -57,6 +58,11 @@
 #     The old group Id in each path is replaced with the new one, and the
 #     same substitution is applied inside RawJson (source_groups[],
 #     destination_groups[], scope[]).
+#
+#     Rules — service references appear in one dedicated CSV column:
+#       * Services      — the service(s) for the rule
+#     The old service Id in each path is replaced with the new one, and the
+#     same substitution is applied inside RawJson (services[]).
 #
 #     Policies — group references appear in one CSV column:
 #       * Scope         — the applied-to group path(s) for the policy
@@ -241,9 +247,10 @@ Write-Host ""
 Write-Host "Step $ruleStepNumber/$ruleTotalSteps — Sanitizing firewall rules and policies..." -ForegroundColor Magenta
 
 $step3Params = @{
-    RulesFile = $RulesFile
-    RulesOut  = $RulesOut
-    IdMap     = $groupIdMap
+    RulesFile    = $RulesFile
+    RulesOut     = $RulesOut
+    IdMap        = $groupIdMap
+    ServiceIdMap = $serviceIdMap
 }
 
 if ($PoliciesFile) {
