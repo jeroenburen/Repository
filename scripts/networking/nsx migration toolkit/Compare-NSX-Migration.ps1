@@ -109,7 +109,7 @@
         -OutputFolder C:\Reports\Migration -LogTarget Both
 
 .NOTES
-    Version : 1.4.2
+    Version : 1.4.3
     Changelog:
       1.0.0  Initial release.
       1.0.1  Fixed Build-Map: replaced $_ with $obj inside foreach loop ($_ is
@@ -220,7 +220,7 @@ param(
     [string]$ServiceMappingFile = ''
 )
 
-$ScriptVersion = '1.4.2'
+$ScriptVersion = '1.4.3'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -733,34 +733,35 @@ function Compare-Groups {
         # ConjunctionOperator entries are skipped; NestedExpression blocks are
         # unpacked by pushing their inner expressions onto the stack.
         # This means conditions/paths split across any structure compare equally.
-        $srcLeaves = [System.Collections.Generic.List[object]]::new()
-        $stack = [System.Collections.Generic.Stack[object]]::new()
-        $srcExprList = if ($src.PSObject.Properties['expression'] -and $null -ne $src.expression) { @($src.expression) } else { @() }
-        foreach ($e in $srcExprList) { if ($null -ne $e) { $stack.Push($e) } }
-        while ($stack.Count -gt 0) {
-            $e = $stack.Pop()
+        # Flatten leaf expressions using a plain array as a queue (no .NET generics).
+        # Process each expression: skip nulls/ConjunctionOperators, unpack NestedExpressions,
+        # collect everything else as a leaf.
+        $srcLeaves = @()
+        $srcQueue = if ($src.PSObject.Properties['expression'] -and $null -ne $src.expression) { @($src.expression | Where-Object { $null -ne $_ }) } else { @() }
+        for ($qi = 0; $qi -lt $srcQueue.Count; $qi++) {
+            $e = $srcQueue[$qi]
             if ($null -eq $e) { continue }
             $rt = if ($e.PSObject.Properties['resource_type']) { $e.resource_type } else { '' }
             if ($rt -eq 'ConjunctionOperator') { continue }
             if ($rt -eq 'NestedExpression') {
-                $innerList = if ($e.PSObject.Properties['expressions'] -and $null -ne $e.expressions) { @($e.expressions) } else { @() }
-                foreach ($ie in $innerList) { if ($null -ne $ie) { $stack.Push($ie) } }
-            } else { $srcLeaves.Add($e) }
+                if ($e.PSObject.Properties['expressions'] -and $null -ne $e.expressions) {
+                    $srcQueue += @($e.expressions | Where-Object { $null -ne $_ })
+                }
+            } else { $srcLeaves += $e }
         }
 
-        $dstLeaves = [System.Collections.Generic.List[object]]::new()
-        $stack = [System.Collections.Generic.Stack[object]]::new()
-        $dstExprList = if ($dst.PSObject.Properties['expression'] -and $null -ne $dst.expression) { @($dst.expression) } else { @() }
-        foreach ($e in $dstExprList) { if ($null -ne $e) { $stack.Push($e) } }
-        while ($stack.Count -gt 0) {
-            $e = $stack.Pop()
+        $dstLeaves = @()
+        $dstQueue = if ($dst.PSObject.Properties['expression'] -and $null -ne $dst.expression) { @($dst.expression | Where-Object { $null -ne $_ }) } else { @() }
+        for ($qi = 0; $qi -lt $dstQueue.Count; $qi++) {
+            $e = $dstQueue[$qi]
             if ($null -eq $e) { continue }
             $rt = if ($e.PSObject.Properties['resource_type']) { $e.resource_type } else { '' }
             if ($rt -eq 'ConjunctionOperator') { continue }
             if ($rt -eq 'NestedExpression') {
-                $innerList = if ($e.PSObject.Properties['expressions'] -and $null -ne $e.expressions) { @($e.expressions) } else { @() }
-                foreach ($ie in $innerList) { if ($null -ne $ie) { $stack.Push($ie) } }
-            } else { $dstLeaves.Add($e) }
+                if ($e.PSObject.Properties['expressions'] -and $null -ne $e.expressions) {
+                    $dstQueue += @($e.expressions | Where-Object { $null -ne $_ })
+                }
+            } else { $dstLeaves += $e }
         }
 
         # --- Flatten all PathExpression paths from source (with ID translation) ---
