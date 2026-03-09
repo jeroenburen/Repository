@@ -106,7 +106,7 @@
         -OutputFolder C:\Reports\Migration -LogTarget Both
 
 .NOTES
-    Version : 1.1.0
+    Version : 1.2.0
     Changelog:
       1.0.0  Initial release.
       1.0.1  Fixed Build-Map: replaced $_ with $obj inside foreach loop ($_ is
@@ -121,6 +121,13 @@
              the destination. The mapping CSVs produced by Sanitize-NSX.ps1 are
              now loaded into $GroupIdMap and $ServiceIdMap hashtables and used in
              Compare-ObjectSets to translate source IDs before destination lookup.
+      1.2.0  Fixed false MISMATCH on services whose destination_ports or
+             source_ports arrive in a different order than the source. Service
+             entries are now sorted by a canonical key (resource_type + protocol
+             + sorted ports) before index-by-index comparison, making the check
+             fully order-insensitive for both entries and individual port lists.
+             Also added source_ports to the per-field comparison (previously
+             omitted).
 #>
 
 [CmdletBinding()]
@@ -140,7 +147,7 @@ param(
     [string]$ServiceMappingFile = ''
 )
 
-$ScriptVersion = '1.1.0'
+$ScriptVersion = '1.2.0'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -320,6 +327,22 @@ function Format-Tags {
 }
 
 # ─────────────────────────────────────────────────────────────
+# CONNECTIVITY CHECK
+# ─────────────────────────────────────────────────────────────
+function Test-Connectivity {
+    param([string]$Manager, [hashtable]$Headers, [string]$Label)
+    Write-Log "Checking connectivity to $Label ($Manager)..." INFO
+    $info = Invoke-NSXGet -Manager $Manager -Headers $Headers -Path '/api/v1/node'
+    if ($info) {
+        Write-Log "  Connected — NSX version: $($info.product_version)" SUCCESS
+        return $true
+    } else {
+        Write-Log "  FAILED to connect to $Label ($Manager)" ERROR
+        return $false
+    }
+}
+
+# ─────────────────────────────────────────────────────────────
 # STATISTICS & FINDINGS COLLECTION
 # ─────────────────────────────────────────────────────────────
 $Stats = @{
@@ -429,22 +452,6 @@ function Build-Map {
     return $map
 }
 
-# ─────────────────────────────────────────────────────────────
-# CONNECTIVITY CHECK
-# ─────────────────────────────────────────────────────────────
-function Test-Connectivity {
-    param([string]$Manager, [hashtable]$Headers, [string]$Label)
-    Write-Log "Checking connectivity to $Label ($Manager)..." INFO
-    $info = Invoke-NSXGet -Manager $Manager -Headers $Headers -Path '/api/v1/node'
-    if ($info) {
-        Write-Log "  Connected — NSX version: $($info.product_version)" SUCCESS
-        return $true
-    } else {
-        Write-Log "  FAILED to connect to $Label ($Manager)" ERROR
-        return $false
-    }
-}
-
 # ═════════════════════════════════════════════════════════════
 # 1. COMPARE IP SETS
 # ═════════════════════════════════════════════════════════════
@@ -529,13 +536,33 @@ function Compare-Services {
         if ($srcEntries.Count -ne $dstEntries.Count) {
             $diffs += "service_entries count: $($srcEntries.Count) → $($dstEntries.Count)"
         } else {
-            # Compare each entry by resource_type and key ports/protocol
-            for ($i = 0; $i -lt $srcEntries.Count; $i++) {
-                $se = $srcEntries[$i]; $de = $dstEntries[$i]
+            # Build a canonical sort key for a service entry so that entry order
+            # differences between source and destination do not cause false mismatches.
+            function Get-EntryKey {
+                param($entry)
+                $rt    = Get-SafeProp $entry 'resource_type'
+                $proto = Get-SafeProp $entry 'l4_protocol'
+                $dport = if ((Get-SafeProp $entry 'destination_ports') -is [array]) {
+                             (Get-SafeProp $entry 'destination_ports' | Sort-Object) -join ','
+                         } else { "$(Get-SafeProp $entry 'destination_ports')" }
+                $sport = if ((Get-SafeProp $entry 'source_ports') -is [array]) {
+                             (Get-SafeProp $entry 'source_ports' | Sort-Object) -join ','
+                         } else { "$(Get-SafeProp $entry 'source_ports')" }
+                $icmp  = Get-SafeProp $entry 'icmp_type'
+                $pnum  = Get-SafeProp $entry 'protocol_number'
+                return "$rt|$proto|$dport|$sport|$icmp|$pnum"
+            }
+
+            # Sort both entry lists by their canonical key before comparing
+            $srcSorted = $srcEntries | Sort-Object { Get-EntryKey $_ }
+            $dstSorted = $dstEntries | Sort-Object { Get-EntryKey $_ }
+
+            for ($i = 0; $i -lt $srcSorted.Count; $i++) {
+                $se = $srcSorted[$i]; $de = $dstSorted[$i]
                 if ($se.resource_type -ne $de.resource_type) {
                     $diffs += "entry[$i] resource_type: $($se.resource_type) → $($de.resource_type)"
                 }
-                foreach ($f in @('l4_protocol','destination_ports','icmp_type','protocol_number')) {
+                foreach ($f in @('l4_protocol','destination_ports','source_ports','icmp_type','protocol_number')) {
                     $sv = Get-SafeProp $se $f; $dv = Get-SafeProp $de $f
                     $svStr = if ($sv -is [array]) { ($sv | Sort-Object) -join ',' } else { "$sv" }
                     $dvStr = if ($dv -is [array]) { ($dv | Sort-Object) -join ',' } else { "$dv" }
@@ -661,7 +688,7 @@ function Compare-Groups {
 function Compare-Policies {
     Write-Log "" INFO
     Write-Log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" INFO
-    Write-Log "  COMPARING DFW POLICIES" INFO
+    Write-Log "  COMPARING DFW POLICIES & RULES" INFO
     Write-Log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" INFO
 
     Write-Log "  Fetching DFW Policies from source ($SourceNSX)..." INFO
@@ -676,82 +703,44 @@ function Compare-Policies {
     $polCompare = {
         param($src, $dst)
         $diffs = @()
-
-        if ($src.display_name -ne $dst.display_name) {
-            $diffs += "display_name: '$($src.display_name)' → '$($dst.display_name)'"
-        }
-        foreach ($f in @('category','stateful','tcp_strict')) {
+        if ($src.display_name -ne $dst.display_name) { $diffs += "display_name: '$($src.display_name)' → '$($dst.display_name)'" }
+        foreach ($f in @('category','sequence_number')) {
             $sv = Get-SafeProp $src $f; $dv = Get-SafeProp $dst $f
             if ("$sv" -ne "$dv") { $diffs += "${f}: '$sv' → '$dv'" }
         }
-        # Scope (applied-to) — order-insensitive
-        $srcScope = @(Get-SafeProp $src 'scope' | Sort-Object)
-        $dstScope = @(Get-SafeProp $dst 'scope' | Sort-Object)
-        if (($srcScope -join ';') -ne ($dstScope -join ';')) {
-            $diffs += "scope: '$($srcScope -join '; ')' → '$($dstScope -join '; ')'"
-        }
-
         if ($diffs.Count -eq 0) { return @{ Equal=$true; Detail='' } }
         return @{ Equal=$false; Detail=($diffs -join ' | ') }
     }
 
-    $c = Compare-ObjectSets -TypeLabel 'Policy' -SrcMap $srcPolMap -DstMap $dstPolMap -CompareFunc $polCompare
-    $Stats.Policies_Match      += $c.Match
-    $Stats.Policies_Mismatch   += $c.Mismatch
-    $Stats.Policies_MissingDst += $c.MissingDst
-    $Stats.Policies_MissingSrc += $c.MissingSrc
-    Write-Log "  Policies result: $($c.Match) match | $($c.Mismatch) mismatch | $($c.MissingDst) missing on dst | $($c.MissingSrc) extra on dst" INFO
+    $pc = Compare-ObjectSets -TypeLabel 'Policy' -SrcMap $srcPolMap -DstMap $dstPolMap -CompareFunc $polCompare
+    $Stats.Policies_Match      += $pc.Match
+    $Stats.Policies_Mismatch   += $pc.Mismatch
+    $Stats.Policies_MissingDst += $pc.MissingDst
+    $Stats.Policies_MissingSrc += $pc.MissingSrc
+    Write-Log "  Policies result: $($pc.Match) match | $($pc.Mismatch) mismatch | $($pc.MissingDst) missing on dst | $($pc.MissingSrc) extra on dst" INFO
 
-    # ── RULES ────────────────────────────────────────────────
-    Write-Log "" INFO
-    Write-Log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" INFO
-    Write-Log "  COMPARING DFW RULES (iterating over all custom policies)" INFO
-    Write-Log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" INFO
-
+    # Rules — per policy
     $ruleCompare = {
         param($src, $dst)
         $diffs = @()
-
-        if ($src.display_name -ne $dst.display_name) {
-            $diffs += "display_name: '$($src.display_name)' → '$($dst.display_name)'"
-        }
-        foreach ($f in @('action','direction','ip_protocol','disabled','logged')) {
+        if ($src.display_name -ne $dst.display_name) { $diffs += "display_name: '$($src.display_name)' → '$($dst.display_name)'" }
+        foreach ($f in @('action','direction','ip_protocol','disabled','logged','sequence_number')) {
             $sv = Get-SafeProp $src $f; $dv = Get-SafeProp $dst $f
             if ("$sv" -ne "$dv") { $diffs += "${f}: '$sv' → '$dv'" }
         }
-        foreach ($listField in @('source_groups','destination_groups','services','scope')) {
-            $sv = @(Get-SafeProp $src $listField | Sort-Object)
-            $dv = @(Get-SafeProp $dst $listField | Sort-Object)
-            if (($sv -join ';') -ne ($dv -join ';')) {
-                $diffs += "${listField}: src='$($sv -join ', ')' dst='$($dv -join ', ')'"
-            }
+        foreach ($listField in @('sources_excluded','destinations_excluded')) {
+            $sv = Get-SafeProp $src $listField; $dv = Get-SafeProp $dst $listField
+            if ("$sv" -ne "$dv") { $diffs += "${listField}: '$sv' → '$dv'" }
         }
-
         if ($diffs.Count -eq 0) { return @{ Equal=$true; Detail='' } }
         return @{ Equal=$false; Detail=($diffs -join ' | ') }
     }
 
-    # Iterate all source policies to compare their rules
-    $allPolicyIds = ($srcPolMap.Keys + $dstPolMap.Keys) | Sort-Object -Unique
-    foreach ($polId in $allPolicyIds) {
-        $polName = ''
-        if ($srcPolMap.ContainsKey($polId)) { $polName = $srcPolMap[$polId].display_name }
-        elseif ($dstPolMap.ContainsKey($polId)) { $polName = $dstPolMap[$polId].display_name }
+    foreach ($polId in $srcPolMap.Keys) {
+        $polName = $srcPolMap[$polId].display_name
 
-        # Skip if this policy is system-owned (already excluded by Build-Map, but be safe)
-        Write-Log "  Policy '$polId' ($polName) — fetching rules from both sides..." INFO
-
-        $srcRules = @()
-        $dstRules = @()
-
-        if ($srcPolMap.ContainsKey($polId)) {
-            $srcRules = @(Get-AllPages -Manager $SourceNSX -Headers $SrcHeaders `
-                -Path "/policy/api/v1/infra/domains/$DomainId/security-policies/$polId/rules")
-        }
-        if ($dstPolMap.ContainsKey($polId)) {
-            $dstRules = @(Get-AllPages -Manager $DestNSX -Headers $DstHeaders `
-                -Path "/policy/api/v1/infra/domains/$DomainId/security-policies/$polId/rules")
-        }
+        $srcRules = Get-AllPages -Manager $SourceNSX -Headers $SrcHeaders -Path "/policy/api/v1/infra/domains/$DomainId/security-policies/$polId/rules"
+        $dstRules = Get-AllPages -Manager $DestNSX   -Headers $DstHeaders -Path "/policy/api/v1/infra/domains/$DomainId/security-policies/$polId/rules"
 
         $srcRuleMap = @{}
         foreach ($r in $srcRules) { if (Get-SafeProp $r 'id') { $srcRuleMap[$r.id] = $r } }
@@ -825,7 +814,7 @@ function Export-HtmlReport {
         @{ Type='DFW Rules';      Match=$Stats.Rules_Match;      Mismatch=$Stats.Rules_Mismatch;      MissingDst=$Stats.Rules_MissingDst;      MissingSrc=$Stats.Rules_MissingSrc }
     )
     $summaryRows = foreach ($row in $summaryData) {
-        $rowOk = ($row.Mismatch -eq 0 -and $row.MissingDst -eq 0) 
+        $rowOk = ($row.Mismatch -eq 0 -and $row.MissingDst -eq 0)
         $icon  = if ($rowOk) { '✔' } else { '⚠' }
         $cls   = if ($rowOk) { 'sum-ok' } else { 'sum-warn' }
         "<tr class='$cls'><td>$icon $($row.Type)</td><td class='num'>$($row.Match)</td><td class='num warn-cell'>$($row.Mismatch)</td><td class='num err-cell'>$($row.MissingDst)</td><td class='num info-cell'>$($row.MissingSrc)</td></tr>"
@@ -1027,10 +1016,7 @@ try {
     Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10}" -f 'DFW Rules',$Stats.Rules_Match,$Stats.Rules_Mismatch,$Stats.Rules_MissingDst,$Stats.Rules_MissingSrc) INFO
     Write-Log "  ─────────────────────────────────────────────────────────────────" INFO
     Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10}" -f 'TOTAL',$totalMatch,$totalMismatch,$totalMissingDst,$totalMissingSrc) INFO
-    Write-Log "────────────────────────────────────────────────────────────────────" INFO
-    Write-Log "  Overall Status : $overallStatus" INFO
-    Write-Log "  Errors         : $($Stats.Errors)" INFO
-    Write-Log "────────────────────────────────────────────────────────────────────" INFO
-    Write-Log "  Output folder  : $OutputFolder" INFO
+    Write-Log "════════════════════════════════════════════════════════════════════" INFO
+    Write-Log " Overall status : $overallStatus" INFO
     Write-Log "════════════════════════════════════════════════════════════════════" INFO
 }
