@@ -109,7 +109,7 @@
         -OutputFolder C:\Reports\Migration -LogTarget Both
 
 .NOTES
-    Version : 1.3.1
+    Version : 1.3.2
     Changelog:
       1.0.0  Initial release.
       1.0.1  Fixed Build-Map: replaced $_ with $obj inside foreach loop ($_ is
@@ -168,6 +168,11 @@
              PathExpression entries are collected into one set (with ID mapping
              applied) and all Conditions into another, then compared as sets.
              The number or structure of expression entries no longer matters.
+      1.3.2  Fixed false MISMATCH on groups where conditions are wrapped inside
+             NestedExpression blocks on one side but not the other. Added a
+             recursive Get-LeafExpressions helper that unpacks NestedExpression
+             blocks at any depth before collecting Conditions and PathExpression
+             paths, so the structural grouping of expressions is fully ignored.
 #>
 
 [CmdletBinding()]
@@ -178,7 +183,7 @@ param(
     [string]$OutputFolder    = ".\NSX_Validation_$(Get-Date -Format 'yyyyMMdd_HHmmss')",
     [string]$LogFile         = '',
     [ValidateSet('Screen','File','Both')]
-    [string]$LogTarget       = 'Screen',
+    [string]$LogTarget       = 'Both',
     [bool]$CompareIPSets     = $false,
     [bool]$CompareServices   = $true,
     [bool]$CompareGroups     = $true,
@@ -188,7 +193,7 @@ param(
     [string]$ServiceMappingFile = ''
 )
 
-$ScriptVersion = '1.3.1'
+$ScriptVersion = '1.3.2'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -695,17 +700,37 @@ function Compare-Groups {
         }
 
         # Compare expressions using a flattened, type-bucketed approach.
-        # ConjunctionOperator entries are ignored as NSX auto-generates them.
-        # PathExpression paths are collected across ALL expressions into one set
-        # so that splitting one criteria into two (or merging them) does not
-        # cause a false mismatch — only the total set of paths matters.
-        # Conditions are similarly collected into a flat set of key|op|value|type
-        # canonical strings and compared as sets regardless of expression count.
-        $srcExpr = @(Get-SafeProp $src 'expression' | Where-Object { (Get-SafeProp $_ 'resource_type') -ne 'ConjunctionOperator' })
-        $dstExpr = @(Get-SafeProp $dst 'expression' | Where-Object { (Get-SafeProp $_ 'resource_type') -ne 'ConjunctionOperator' })
+        # ConjunctionOperator entries are ignored — NSX auto-generates them.
+        # NestedExpression blocks are recursively unpacked so that conditions or
+        # paths inside them are treated the same as top-level ones. This means
+        # splitting one criteria block into two (or nesting it) does not cause
+        # a false mismatch — only the total set of paths/conditions matters.
+
+        # Helper: recursively collect all leaf expression entries from a list,
+        # unpacking NestedExpression blocks and skipping ConjunctionOperators.
+        function Get-LeafExpressions {
+            param([object[]]$Exprs)
+            $leaves = [System.Collections.Generic.List[object]]::new()
+            foreach ($e in $Exprs) {
+                $rt = Get-SafeProp $e 'resource_type'
+                if ($rt -eq 'ConjunctionOperator') { continue }
+                if ($rt -eq 'NestedExpression') {
+                    $inner = @(Get-SafeProp $e 'expressions')
+                    if ($inner) {
+                        foreach ($leaf in (Get-LeafExpressions -Exprs $inner)) { $leaves.Add($leaf) }
+                    }
+                } else {
+                    $leaves.Add($e)
+                }
+            }
+            return $leaves.ToArray()
+        }
+
+        $srcLeaves = @(Get-LeafExpressions -Exprs @(Get-SafeProp $src 'expression'))
+        $dstLeaves = @(Get-LeafExpressions -Exprs @(Get-SafeProp $dst 'expression'))
 
         # --- Flatten all PathExpression paths from source (with ID translation) ---
-        $srcAllPaths = @($srcExpr | Where-Object { (Get-SafeProp $_ 'resource_type') -eq 'PathExpression' } | ForEach-Object {
+        $srcAllPaths = @($srcLeaves | Where-Object { (Get-SafeProp $_ 'resource_type') -eq 'PathExpression' } | ForEach-Object {
             Get-SafeProp $_ 'paths'
         } | ForEach-Object {
             if ($_ -match '^(.*/)([^/]+)$') {
@@ -714,7 +739,7 @@ function Compare-Groups {
             } else { $_ }
         } | Sort-Object)
 
-        $dstAllPaths = @($dstExpr | Where-Object { (Get-SafeProp $_ 'resource_type') -eq 'PathExpression' } | ForEach-Object {
+        $dstAllPaths = @($dstLeaves | Where-Object { (Get-SafeProp $_ 'resource_type') -eq 'PathExpression' } | ForEach-Object {
             Get-SafeProp $_ 'paths'
         } | Sort-Object)
 
@@ -724,11 +749,11 @@ function Compare-Groups {
         if ($removedPaths) { $diffs += "paths missing on dst: $($removedPaths -join ', ')" }
 
         # --- Flatten all Conditions from source and destination ---
-        $srcConditions = @($srcExpr | Where-Object { (Get-SafeProp $_ 'resource_type') -eq 'Condition' } | ForEach-Object {
+        $srcConditions = @($srcLeaves | Where-Object { (Get-SafeProp $_ 'resource_type') -eq 'Condition' } | ForEach-Object {
             "$( Get-SafeProp $_ 'member_type' )|$( Get-SafeProp $_ 'key' )|$( Get-SafeProp $_ 'operator' )|$( Get-SafeProp $_ 'value' )"
         } | Sort-Object)
 
-        $dstConditions = @($dstExpr | Where-Object { (Get-SafeProp $_ 'resource_type') -eq 'Condition' } | ForEach-Object {
+        $dstConditions = @($dstLeaves | Where-Object { (Get-SafeProp $_ 'resource_type') -eq 'Condition' } | ForEach-Object {
             "$( Get-SafeProp $_ 'member_type' )|$( Get-SafeProp $_ 'key' )|$( Get-SafeProp $_ 'operator' )|$( Get-SafeProp $_ 'value' )"
         } | Sort-Object)
 
