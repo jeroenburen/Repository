@@ -118,7 +118,7 @@
         -OutputFolder C:\Reports\Migration -LogTarget Both
 
 .NOTES
-    Version : 1.4.0
+    Version : 1.5.0
     Changelog:
       1.0.0  Initial release.
       1.0.1  Fixed Build-Map: replaced $_ with $obj inside foreach loop ($_ is
@@ -218,6 +218,10 @@
              order. Added the review list groups as a dedicated section in both
              the console validation summary and the HTML report summary table, so
              reviewers can see which groups were deliberately downgraded to REVIEW.
+      1.5.0  Removed IP Sets and Service Groups from both the console summary
+             table and the HTML summary table — these object types are not
+             compared by this script. Added Context Profiles to both summary
+             tables. Adjusted totals calculations accordingly.
 #>
 
 [CmdletBinding()]
@@ -239,7 +243,7 @@ param(
     [string]$GroupReviewList       = ''
 )
 
-$ScriptVersion = '1.4.0'
+$ScriptVersion = '1.5.0'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -1063,12 +1067,11 @@ function Export-HtmlReport {
 
     # Summary rows
     $summaryData = @(
-        @{ Type='IP Sets';        Match=$Stats.IPSets_Match;     Mismatch=$Stats.IPSets_Mismatch;     MissingDst=$Stats.IPSets_MissingDst;     MissingSrc=$Stats.IPSets_MissingSrc }
-        @{ Type='Services';       Match=$Stats.Services_Match;   Mismatch=$Stats.Services_Mismatch;   MissingDst=$Stats.Services_MissingDst;   MissingSrc=$Stats.Services_MissingSrc }
-        @{ Type='Service Groups'; Match=$Stats.SvcGroups_Match;  Mismatch=$Stats.SvcGroups_Mismatch;  MissingDst=$Stats.SvcGroups_MissingDst;  MissingSrc=$Stats.SvcGroups_MissingSrc }
-        @{ Type='Security Groups';Match=$Stats.Groups_Match;     Mismatch=$Stats.Groups_Mismatch;     MissingDst=$Stats.Groups_MissingDst;     MissingSrc=$Stats.Groups_MissingSrc }
-        @{ Type='DFW Policies';   Match=$Stats.Policies_Match;   Mismatch=$Stats.Policies_Mismatch;   MissingDst=$Stats.Policies_MissingDst;   MissingSrc=$Stats.Policies_MissingSrc }
-        @{ Type='DFW Rules';      Match=$Stats.Rules_Match;      Mismatch=$Stats.Rules_Mismatch;      MissingDst=$Stats.Rules_MissingDst;      MissingSrc=$Stats.Rules_MissingSrc }
+        @{ Type='Services';        Match=$Stats.Services_Match;  Mismatch=$Stats.Services_Mismatch;  MissingDst=$Stats.Services_MissingDst;  MissingSrc=$Stats.Services_MissingSrc }
+        @{ Type='Security Groups'; Match=$Stats.Groups_Match;    Mismatch=$Stats.Groups_Mismatch;    MissingDst=$Stats.Groups_MissingDst;    MissingSrc=$Stats.Groups_MissingSrc }
+        @{ Type='Context Profiles';Match=$Stats.Profiles_Match;  Mismatch=$Stats.Profiles_Mismatch;  MissingDst=$Stats.Profiles_MissingDst;  MissingSrc=$Stats.Profiles_MissingSrc }
+        @{ Type='DFW Policies';    Match=$Stats.Policies_Match;  Mismatch=$Stats.Policies_Mismatch;  MissingDst=$Stats.Policies_MissingDst;  MissingSrc=$Stats.Policies_MissingSrc }
+        @{ Type='DFW Rules';       Match=$Stats.Rules_Match;     Mismatch=$Stats.Rules_Mismatch;     MissingDst=$Stats.Rules_MissingDst;     MissingSrc=$Stats.Rules_MissingSrc }
     )
     $summaryRows = foreach ($row in $summaryData) {
         $rowOk = ($row.Mismatch -eq 0 -and $row.MissingDst -eq 0)
@@ -1277,10 +1280,10 @@ try {
     exit 1
 } finally {
     # Totals
-    $totalMatch      = ($Stats.IPSets_Match + $Stats.Services_Match + $Stats.SvcGroups_Match + $Stats.Groups_Match + $Stats.Profiles_Match + $Stats.Policies_Match + $Stats.Rules_Match)
-    $totalMismatch   = ($Stats.IPSets_Mismatch + $Stats.Services_Mismatch + $Stats.SvcGroups_Mismatch + $Stats.Groups_Mismatch + $Stats.Profiles_Mismatch + $Stats.Policies_Mismatch + $Stats.Rules_Mismatch)
-    $totalMissingDst = ($Stats.IPSets_MissingDst + $Stats.Services_MissingDst + $Stats.SvcGroups_MissingDst + $Stats.Groups_MissingDst + $Stats.Profiles_MissingDst + $Stats.Policies_MissingDst + $Stats.Rules_MissingDst)
-    $totalMissingSrc = ($Stats.IPSets_MissingSrc + $Stats.Services_MissingSrc + $Stats.SvcGroups_MissingSrc + $Stats.Groups_MissingSrc + $Stats.Profiles_MissingSrc + $Stats.Policies_MissingSrc + $Stats.Rules_MissingSrc)
+    $totalMatch      = ($Stats.Services_Match  + $Stats.Groups_Match  + $Stats.Profiles_Match  + $Stats.Policies_Match  + $Stats.Rules_Match)
+    $totalMismatch   = ($Stats.Services_Mismatch + $Stats.Groups_Mismatch + $Stats.Profiles_Mismatch + $Stats.Policies_Mismatch + $Stats.Rules_Mismatch)
+    $totalMissingDst = ($Stats.Services_MissingDst + $Stats.Groups_MissingDst + $Stats.Profiles_MissingDst + $Stats.Policies_MissingDst + $Stats.Rules_MissingDst)
+    $totalMissingSrc = ($Stats.Services_MissingSrc + $Stats.Groups_MissingSrc + $Stats.Profiles_MissingSrc + $Stats.Policies_MissingSrc + $Stats.Rules_MissingSrc)
     $overallStatus   = if ($totalMismatch -eq 0 -and $totalMissingDst -eq 0) { if ($Stats.Groups_Review -gt 0) { 'PASSED WITH REVIEWS ✔' } else { 'PASSED ✔' } } else { 'ISSUES FOUND ⚠' }
 
     Write-Log "" INFO
@@ -1289,9 +1292,7 @@ try {
     Write-Log "────────────────────────────────────────────────────────────────────" INFO
     Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10} {5,8}" -f 'Object Type','Match','Mismatch','Missing Dst','Extra Dst','Review') INFO
     Write-Log "  ─────────────────────────────────────────────────────────────────" INFO
-    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10} {5,8}" -f 'IP Sets',$Stats.IPSets_Match,$Stats.IPSets_Mismatch,$Stats.IPSets_MissingDst,$Stats.IPSets_MissingSrc,0) INFO
     Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10} {5,8}" -f 'Services',$Stats.Services_Match,$Stats.Services_Mismatch,$Stats.Services_MissingDst,$Stats.Services_MissingSrc,0) INFO
-    Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10} {5,8}" -f 'Service Groups',$Stats.SvcGroups_Match,$Stats.SvcGroups_Mismatch,$Stats.SvcGroups_MissingDst,$Stats.SvcGroups_MissingSrc,0) INFO
     Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10} {5,8}" -f 'Security Groups',$Stats.Groups_Match,$Stats.Groups_Mismatch,$Stats.Groups_MissingDst,$Stats.Groups_MissingSrc,$Stats.Groups_Review) INFO
     Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10} {5,8}" -f 'Context Profiles',$Stats.Profiles_Match,$Stats.Profiles_Mismatch,$Stats.Profiles_MissingDst,$Stats.Profiles_MissingSrc,0) INFO
     Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10} {5,8}" -f 'DFW Policies',$Stats.Policies_Match,$Stats.Policies_Mismatch,$Stats.Policies_MissingDst,$Stats.Policies_MissingSrc,0) INFO
