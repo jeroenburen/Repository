@@ -432,9 +432,8 @@ Write-Log "═══════════════════════
 Write-Log " FILE SELECTION — select source CSV files" INFO
 Write-Log "════════════════════════════════════════════════════════════════════" INFO
 
-$Script:CsvPath_Services      = $null
-$Script:CsvPath_ServiceGroups = $null
-$Script:CsvPath_Groups        = $null
+$Script:CsvPath_Services = $null
+$Script:CsvPath_Groups   = $null
 $Script:CsvPath_Profiles      = $null
 $Script:CsvPath_Policies      = $null
 $Script:CsvPath_Rules         = $null
@@ -442,8 +441,7 @@ $Script:CsvPath_Rules         = $null
 $InitialDir = (Get-Location).Path
 
 if ($CompareServices) {
-    $Script:CsvPath_Services      = Resolve-CsvFile -Label 'Services'       -InitialDir $InitialDir
-    $Script:CsvPath_ServiceGroups = Resolve-CsvFile -Label 'Service Groups' -InitialDir $InitialDir
+    $Script:CsvPath_Services = Resolve-CsvFile -Label 'Services' -InitialDir $InitialDir
 }
 if ($CompareGroups)   { $Script:CsvPath_Groups   = Resolve-CsvFile -Label 'Security Groups'  -InitialDir $InitialDir }
 if ($CompareProfiles) { $Script:CsvPath_Profiles = Resolve-CsvFile -Label 'Context Profiles' -InitialDir $InitialDir }
@@ -569,19 +567,14 @@ function Compare-Services {
     Write-Log "  COMPARING SERVICES & SERVICE GROUPS" INFO
     Write-Log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" INFO
 
-    # Load source rows from both CSVs
+    # Load source rows from Services CSV only
     $svcRows = @()
-    $sgRows  = @()
     if ($Script:CsvPath_Services -and (Test-Path $Script:CsvPath_Services)) {
         $svcRows = @(Import-Csv -Path $Script:CsvPath_Services -Encoding UTF8)
         Write-Log "  Loaded $($svcRows.Count) Service row(s) from CSV." INFO
     }
-    if ($Script:CsvPath_ServiceGroups -and (Test-Path $Script:CsvPath_ServiceGroups)) {
-        $sgRows = @(Import-Csv -Path $Script:CsvPath_ServiceGroups -Encoding UTF8)
-        Write-Log "  Loaded $($sgRows.Count) Service Group row(s) from CSV." INFO
-    }
 
-    $allSrcRows = @($svcRows) + @($sgRows)
+    $allSrcRows = $svcRows
     if ($allSrcRows.Count -eq 0) { Write-Log "  No source rows to compare." WARN; return }
 
     # Apply service ID mapping and rewrite paths in RawJson
