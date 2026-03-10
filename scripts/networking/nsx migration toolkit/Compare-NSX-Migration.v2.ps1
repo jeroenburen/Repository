@@ -103,7 +103,7 @@
         -OutputFolder C:\Reports\Migration -LogTarget Both
 
 .NOTES
-    Version : 2.0.0
+    Version : 2.1.0
     Changelog:
       2.0.0  Complete redesign. Source data is now read from CSV files (same files
              used by Import-NSX-DFW.ps1) instead of querying the source NSX Manager.
@@ -111,6 +111,11 @@
              than field-by-field logic. ID mapping files are used to rewrite source
              IDs and path references to their sanitized equivalents before comparison.
              Added Context Profiles comparison. Removed IP Sets (not in scope).
+      2.1.0  Added owner_id to $ReadOnlyFields so it is stripped from destination
+             payloads before comparison. Fixed display_name rewrite in the remapping
+             blocks for Services and Groups — now mirrors Sanitize-NSXServices.ps1
+             and Sanitize-NSXGroups.ps1 by also updating "display_name" inside
+             RawJson when the object ID was renamed by the sanitize pipeline.
 #>
 
 [CmdletBinding()]
@@ -129,7 +134,7 @@ param(
     [string]$ServiceMappingFile = ''
 )
 
-$ScriptVersion = '2.0.0'
+$ScriptVersion = '2.1.0'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -352,7 +357,7 @@ $ReadOnlyFields = @(
     '_create_time', '_last_modified_time', '_system_owned', '_revision',
     '_create_user', '_last_modified_user', '_protection',
     'path', 'parent_path', 'relative_path', 'unique_id', 'marked_for_delete',
-    'overridden', 'sequence_number'   # sequence_number is managed by NSX internally
+    'overridden', 'owner_id', 'sequence_number'   # sequence_number is managed by NSX internally
 )
 
 # Strip read-only fields from a deserialized PSObject (recursive).
@@ -580,13 +585,20 @@ function Compare-Services {
     # Apply service ID mapping and rewrite paths in RawJson
     $remappedRows = foreach ($row in $allSrcRows) {
         $newId      = Resolve-Id -Id $row.Id -IdMap $ServiceIdMap
+        $oldDisplay = if ($row.PSObject.Properties['DisplayName']) { $row.DisplayName } else { $row.Id }
         $newRawJson = Update-ServicePaths -text $row.RawJson
-        # Also rewrite the "id" and "relative_path" fields inside the JSON itself
-        $newRawJson = [regex]::Replace($newRawJson, '"id"\s*:\s*"' + [regex]::Escape($row.Id) + '"', '"id":"' + $newId + '"')
-        $newRawJson = [regex]::Replace($newRawJson, '"relative_path"\s*:\s*"' + [regex]::Escape($row.Id) + '"', '"relative_path":"' + $newId + '"')
+        # Rewrite "id", "relative_path", and "display_name" inside the JSON —
+        # mirrors what Sanitize-NSXServices.ps1 does when Id != DisplayName
+        if ($row.Id -ne $newId) {
+            $escOldId      = [regex]::Escape($row.Id)
+            $escOldDisplay = [regex]::Escape($oldDisplay)
+            $newRawJson = [regex]::Replace($newRawJson, '"id"\s*:\s*"' + $escOldId + '"',                  '"id":"'           + $newId + '"')
+            $newRawJson = [regex]::Replace($newRawJson, '"relative_path"\s*:\s*"' + $escOldId + '"',       '"relative_path":"' + $newId + '"')
+            $newRawJson = [regex]::Replace($newRawJson, '"display_name"\s*:\s*"' + $escOldDisplay + '"',   '"display_name":"'  + $newId + '"')
+        }
         [PSCustomObject]@{
             Id          = $newId
-            DisplayName = if ($row.PSObject.Properties['DisplayName']) { $row.DisplayName } else { $newId }
+            DisplayName = $oldDisplay
             RawJson     = $newRawJson
         }
     }
@@ -623,13 +635,21 @@ function Compare-Groups {
     # Apply group ID mapping and rewrite path references in RawJson
     $remappedRows = foreach ($row in $srcRows) {
         $newId      = Resolve-Id -Id $row.Id -IdMap $GroupIdMap
-        $newRawJson = Update-GroupPaths  -text $row.RawJson
+        $oldDisplay = if ($row.PSObject.Properties['DisplayName']) { $row.DisplayName } else { $row.Id }
+        $newRawJson = Update-GroupPaths   -text $row.RawJson
         $newRawJson = Update-ServicePaths -text $newRawJson
-        $newRawJson = [regex]::Replace($newRawJson, '"id"\s*:\s*"' + [regex]::Escape($row.Id) + '"', '"id":"' + $newId + '"')
-        $newRawJson = [regex]::Replace($newRawJson, '"relative_path"\s*:\s*"' + [regex]::Escape($row.Id) + '"', '"relative_path":"' + $newId + '"')
+        # Rewrite "id", "relative_path", and "display_name" inside the JSON —
+        # mirrors what Sanitize-NSXGroups.ps1 does when Id != DisplayName
+        if ($row.Id -ne $newId) {
+            $escOldId      = [regex]::Escape($row.Id)
+            $escOldDisplay = [regex]::Escape($oldDisplay)
+            $newRawJson = [regex]::Replace($newRawJson, '"id"\s*:\s*"' + $escOldId + '"',                 '"id":"'           + $newId + '"')
+            $newRawJson = [regex]::Replace($newRawJson, '"relative_path"\s*:\s*"' + $escOldId + '"',      '"relative_path":"' + $newId + '"')
+            $newRawJson = [regex]::Replace($newRawJson, '"display_name"\s*:\s*"' + $escOldDisplay + '"',  '"display_name":"'  + $newId + '"')
+        }
         [PSCustomObject]@{
             Id          = $newId
-            DisplayName = if ($row.PSObject.Properties['DisplayName']) { $row.DisplayName } else { $newId }
+            DisplayName = $oldDisplay
             RawJson     = $newRawJson
         }
     }
