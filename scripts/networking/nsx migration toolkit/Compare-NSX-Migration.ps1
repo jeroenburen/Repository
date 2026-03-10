@@ -82,12 +82,13 @@
     Validate DFW Policies and Rules. Default: $true
 
 .PARAMETER GroupReviewList
-    Comma-separated list of source group IDs whose MISMATCH result should be
-    downgraded to REVIEW in the report. Use for groups that are logically
-    equivalent but structurally different in a way the script cannot resolve
-    (e.g. same conditions split across different criteria blocks). REVIEW rows
-    are visible in the report but do not count as mismatches and do not affect
-    the overall PASSED/ISSUES FOUND status.
+    Path to a plain-text file containing one source group ID per line whose
+    MISMATCH result should be downgraded to REVIEW in the report. Use for
+    groups that are logically equivalent but structurally different in a way
+    the script cannot resolve (e.g. same conditions split across different
+    criteria blocks). REVIEW rows are visible in the report but do not count
+    as mismatches and do not affect the overall PASSED/ISSUES FOUND status.
+    Lines starting with # and blank lines are ignored.
 
 .PARAMETER GroupMappingFile
     Path to the groups ID mapping CSV produced by Sanitize-NSX.ps1
@@ -117,7 +118,7 @@
         -OutputFolder C:\Reports\Migration -LogTarget Both
 
 .NOTES
-    Version : 1.5.0
+    Version : 1.4.0
     Changelog:
       1.0.0  Initial release.
       1.0.1  Fixed Build-Map: replaced $_ with $obj inside foreach loop ($_ is
@@ -208,6 +209,15 @@
              '$(if ($x.PSObject.Properties[$y]) { $x.$($y) }) | pipeline' is invalid — PowerShell cannot use
              & as a pipeline source element. Wrapped all such calls in @() so
              they become '@($(if ($x.PSObject.Properties[$y]) { $x.$($y) })) | pipeline'.
+      1.4.0  Changed -GroupReviewList from a comma-separated string to a path to
+             a plain-text file containing one group ID per line. Lines starting
+             with # and blank lines are ignored. This makes it practical to manage
+             larger review lists without hitting command-line length limits.
+             Moved Write-Log function definition before its first call site so the
+             function is always defined before it is used regardless of execution
+             order. Added the review list groups as a dedicated section in both
+             the console validation summary and the HTML report summary table, so
+             reviewers can see which groups were deliberately downgraded to REVIEW.
 #>
 
 [CmdletBinding()]
@@ -229,69 +239,10 @@ param(
     [string]$GroupReviewList       = ''
 )
 
-$ScriptVersion = '1.5.0'
+$ScriptVersion = '1.4.0'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-
-# ─────────────────────────────────────────────────────────────
-# Groups known to be system-managed but not flagged as _system_owned.
-# These are provisioned by NSX Threat Intelligence, IDS/IPS, and related services.
-# ─────────────────────────────────────────────────────────────
-$pseudoSystemIds = @(
-    'DefaultMaliciousIpGroup',
-    'DefaultUDAGroup'
-)
-
-# ─────────────────────────────────────────────────────────────
-# ID MAPPING TABLES
-#
-# Loaded from the _id_mapping.csv files produced by Sanitize-NSX.ps1.
-# These translate source old IDs (e.g. securitygroup-223) to the renamed
-# IDs that were imported into the destination (e.g. Datacenter).
-# Both hashtables default to empty — comparisons then assume no renaming.
-# ─────────────────────────────────────────────────────────────
-$GroupIdMap   = @{}   # oldId -> newId for security groups
-$ServiceIdMap = @{}   # oldId -> newId for services and service groups
-
-function Load-MappingFile {
-    param([string]$FilePath, [string]$Label)
-    $map = @{}
-    if (-not $FilePath) { return $map }
-    if (-not (Test-Path $FilePath)) {
-        Write-Warning "[$Label] Mapping file not found: $FilePath — ID translation disabled for this type."
-        return $map
-    }
-    $rows = Import-Csv -Path $FilePath -Encoding UTF8
-    foreach ($row in $rows) {
-        if ($row.PSObject.Properties['OldId'] -and $row.PSObject.Properties['NewId'] -and $row.OldId -and $row.NewId) {
-            $map[$row.OldId] = $row.NewId
-        }
-    }
-    Write-Host "  [$Label] Loaded $($map.Count) ID mapping(s) from $(Split-Path $FilePath -Leaf)" -ForegroundColor Cyan
-    return $map
-}
-
-if ($GroupMappingFile)   { $GroupIdMap   = Load-MappingFile -FilePath $GroupMappingFile   -Label 'Groups'   }
-if ($ServiceMappingFile) { $ServiceIdMap = Load-MappingFile -FilePath $ServiceMappingFile -Label 'Services' }
-
-# Build review set from comma-separated list — keys are source group IDs
-$GroupReviewSet = @{}
-if ($GroupReviewList) {
-    foreach ($entry in ($GroupReviewList -split ',')) {
-        $trimmed = $entry.Trim()
-        if ($trimmed) { $GroupReviewSet[$trimmed] = $true }
-    }
-    Write-Log " Group review list: $($GroupReviewSet.Count) group(s) will be downgraded from MISMATCH to REVIEW" INFO
-}
-
-# Translates a source object ID to its (potentially renamed) destination ID.
-# Returns the mapped ID if one exists, otherwise returns the original.
-function Resolve-Id {
-    param([string]$Id, [hashtable]$IdMap)
-    if ($IdMap.ContainsKey($Id)) { return $IdMap[$Id] }
-    return $Id
-}
 
 # ─────────────────────────────────────────────────────────────
 # BOOTSTRAP OUTPUT FOLDER & LOG FILE
@@ -334,6 +285,78 @@ function Write-Log {
             Write-Host $line -ForegroundColor $color
         }
     }
+}
+
+# ─────────────────────────────────────────────────────────────
+# Groups known to be system-managed but not flagged as _system_owned.
+# These are provisioned by NSX Threat Intelligence, IDS/IPS, and related services.
+# ─────────────────────────────────────────────────────────────
+$pseudoSystemIds = @(
+    'DefaultMaliciousIpGroup',
+    'DefaultUDAGroup'
+)
+
+# ─────────────────────────────────────────────────────────────
+# ID MAPPING TABLES
+#
+# Loaded from the _id_mapping.csv files produced by Sanitize-NSX.ps1.
+# These translate source old IDs (e.g. securitygroup-223) to the renamed
+# IDs that were imported into the destination (e.g. Datacenter).
+# Both hashtables default to empty — comparisons then assume no renaming.
+# ─────────────────────────────────────────────────────────────
+$GroupIdMap   = @{}   # oldId -> newId for security groups
+$ServiceIdMap = @{}   # oldId -> newId for services and service groups
+
+function Load-MappingFile {
+    param([string]$FilePath, [string]$Label)
+    $map = @{}
+    if (-not $FilePath) { return $map }
+    if (-not (Test-Path $FilePath)) {
+        Write-Warning "[$Label] Mapping file not found: $FilePath — ID translation disabled for this type."
+        return $map
+    }
+    $rows = Import-Csv -Path $FilePath -Encoding UTF8
+    foreach ($row in $rows) {
+        if ($row.PSObject.Properties['OldId'] -and $row.PSObject.Properties['NewId'] -and $row.OldId -and $row.NewId) {
+            $map[$row.OldId] = $row.NewId
+        }
+    }
+    Write-Log "  [$Label] Loaded $($map.Count) ID mapping(s) from $(Split-Path $FilePath -Leaf)" INFO
+    return $map
+}
+
+if ($GroupMappingFile)   { $GroupIdMap   = Load-MappingFile -FilePath $GroupMappingFile   -Label 'Groups'   }
+if ($ServiceMappingFile) { $ServiceIdMap = Load-MappingFile -FilePath $ServiceMappingFile -Label 'Services' }
+
+# ─────────────────────────────────────────────────────────────
+# GROUP REVIEW SET
+#
+# Loaded from a plain-text file — one source group ID per line.
+# Lines starting with # and blank lines are ignored.
+# Groups in this set have their MISMATCH result downgraded to REVIEW.
+# ─────────────────────────────────────────────────────────────
+$GroupReviewSet = @{}
+if ($GroupReviewList) {
+    if (-not (Test-Path $GroupReviewList)) {
+        Write-Log "Group review list file not found: $GroupReviewList — review list disabled." WARN
+    } else {
+        $lines = Get-Content -Path $GroupReviewList -Encoding UTF8
+        foreach ($line in $lines) {
+            $trimmed = $line.Trim()
+            if ($trimmed -and -not $trimmed.StartsWith('#')) {
+                $GroupReviewSet[$trimmed] = $true
+            }
+        }
+        Write-Log "  [ReviewList] Loaded $($GroupReviewSet.Count) group(s) from $(Split-Path $GroupReviewList -Leaf) — these will be downgraded from MISMATCH to REVIEW" INFO
+    }
+}
+
+# Translates a source object ID to its (potentially renamed) destination ID.
+# Returns the mapped ID if one exists, otherwise returns the original.
+function Resolve-Id {
+    param([string]$Id, [hashtable]$IdMap)
+    if ($IdMap.ContainsKey($Id)) { return $IdMap[$Id] }
+    return $Id
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -1054,6 +1077,25 @@ function Export-HtmlReport {
         "<tr class='$cls'><td>$icon $($row.Type)</td><td class='num'>$($row.Match)</td><td class='num warn-cell'>$($row.Mismatch)</td><td class='num err-cell'>$($row.MissingDst)</td><td class='num info-cell'>$($row.MissingSrc)</td></tr>"
     }
 
+    # Review list section — only rendered when at least one group is in the review set
+    $reviewListHtml = ''
+    if ($GroupReviewSet.Count -gt 0) {
+        $reviewListFile = if ($GroupReviewList) { [System.IO.Path]::GetFileName($GroupReviewList) } else { '' }
+        $reviewRows = ($GroupReviewSet.Keys | Sort-Object) | ForEach-Object {
+            "<tr><td><code>$([System.Web.HttpUtility]::HtmlEncode($_))</code></td></tr>"
+        }
+        $reviewListHtml = @"
+
+<section>
+  <h2>Groups in Review List <span style="font-size:.8rem;font-weight:400;color:var(--gray)">($reviewListFile — $($GroupReviewSet.Count) group(s) downgraded from MISMATCH to REVIEW)</span></h2>
+  <table>
+    <thead><tr><th>Group ID</th></tr></thead>
+    <tbody>$($reviewRows -join "`n")</tbody>
+  </table>
+</section>
+"@
+    }
+
     $html = @"
 <!DOCTYPE html>
 <html lang="en">
@@ -1133,6 +1175,7 @@ function Export-HtmlReport {
   </table>
 </section>
 
+$reviewListHtml
 <section>
   <h2>Detailed Findings</h2>
   <div class="filter-bar">
@@ -1141,6 +1184,7 @@ function Export-HtmlReport {
     <button class="filter-btn" onclick="filterTable('MISMATCH',this)">⚠ Mismatch</button>
     <button class="filter-btn" onclick="filterTable('MISSING_DST',this)">✗ Missing on Dst</button>
     <button class="filter-btn" onclick="filterTable('MISSING_SRC',this)">✗ Extra on Dst</button>
+    <button class="filter-btn" onclick="filterTable('REVIEW',this)">~ Review</button>
   </div>
   <table id="findingsTable">
     <thead><tr><th>Type</th><th>ID</th><th>Display Name</th><th>Result</th><th>Detail</th></tr></thead>
@@ -1156,15 +1200,16 @@ function filterTable(filter, btn) {
   btn.classList.add('active');
   const rows = document.querySelectorAll('#findingsTable tbody tr');
   rows.forEach(row => {
-    if (filter === 'ALL') { row.style.display = ''; return; }
     const badge = row.querySelector('.badge');
-    if (!badge) { row.style.display = 'none'; return; }
+    if (!badge) { row.style.display = filter === 'ALL' ? '' : 'none'; return; }
     const cls = badge.className;
     const show =
+      (filter === 'ALL') ||
       (filter === 'MATCH'       && cls.includes('match') && !cls.includes('mis')) ||
       (filter === 'MISMATCH'    && cls.includes('mismatch')) ||
       (filter === 'MISSING_DST' && cls.includes('missing-dst')) ||
-      (filter === 'MISSING_SRC' && cls.includes('missing-src'));
+      (filter === 'MISSING_SRC' && cls.includes('missing-src')) ||
+      (filter === 'REVIEW'      && cls.includes('review'));
     row.style.display = show ? '' : 'none';
   });
 }
@@ -1198,7 +1243,7 @@ Write-Log " Output folder   : $OutputFolder" INFO
 Write-Log " Log file        : $LogFile" INFO
 Write-Log " Group mapping   : $(if ($GroupMappingFile)   { $GroupMappingFile   } else { '(none — IDs assumed unchanged)' })" INFO
 Write-Log " Service mapping : $(if ($ServiceMappingFile) { $ServiceMappingFile } else { '(none — IDs assumed unchanged)' })" INFO
-Write-Log " Review list     : $(if ($GroupReviewList) { "$($GroupReviewSet.Count) group(s): $($GroupReviewSet.Keys -join ', ')" } else { '(none)' })" INFO
+Write-Log " Review list     : $(if ($GroupReviewList) { "$(Split-Path $GroupReviewList -Leaf) — $($GroupReviewSet.Count) group(s)" } else { '(none)' })" INFO
 Write-Log "════════════════════════════════════════════════════════════════════" INFO
 Write-Log " NOTE: System-owned objects are EXCLUDED from all comparisons." INFO
 Write-Log "════════════════════════════════════════════════════════════════════" INFO
@@ -1255,5 +1300,13 @@ try {
     Write-Log ("  {0,-20} {1,8} {2,10} {3,12} {4,10} {5,8}" -f 'TOTAL',$totalMatch,$totalMismatch,$totalMissingDst,$totalMissingSrc,$Stats.Groups_Review) INFO
     Write-Log "════════════════════════════════════════════════════════════════════" INFO
     Write-Log " Overall status : $overallStatus" INFO
+    if ($GroupReviewSet.Count -gt 0) {
+        Write-Log "────────────────────────────────────────────────────────────────────" INFO
+        Write-Log " GROUPS IN REVIEW LIST ($($GroupReviewSet.Count))" INFO
+        Write-Log "────────────────────────────────────────────────────────────────────" INFO
+        foreach ($groupId in ($GroupReviewSet.Keys | Sort-Object)) {
+            Write-Log "  ~ $groupId" WARN
+        }
+    }
     Write-Log "════════════════════════════════════════════════════════════════════" INFO
 }
