@@ -100,7 +100,7 @@ $pseudoSystemGroupIds = @(
 # NSX will reject DELETE requests for these with a 400/403 error.
 # ─────────────────────────────────────────────────────────────
 $pseudoSystemPolicyIds = @(
-    'default-layer-3-section',
+    'default-layer3-section',
     'default-malicious-ip-block-rules',
     'default-layer2-section'
 )
@@ -499,7 +499,6 @@ function Export-Policies {
     Write-Log "  Exported $($Stats.Policies) Policies → $polCsv" SUCCESS
     Write-Log "  Exported $($Stats.Rules) Rules → $ruleCsv" SUCCESS
 }
-
 
 # ═════════════════════════════════════════════════════════════
 # 6. EXPORT VM TAGS
