@@ -90,9 +90,19 @@ $ErrorActionPreference = 'Stop'
 # Groups known to be system-managed but not flagged as _system_owned.
 # These are provisioned by NSX Threat Intelligence, IDS/IPS, and related services.
 # ─────────────────────────────────────────────────────────────
-$pseudoSystemIds = @(
+$pseudoSystemGroupIds = @(
     'DefaultMaliciousIpGroup',
     'DefaultUDAGroup'
+)
+
+# ─────────────────────────────────────────────────────────────
+# Policies known to be system-managed but not flagged as _system_owned.
+# NSX will reject DELETE requests for these with a 400/403 error.
+# ─────────────────────────────────────────────────────────────
+$pseudoSystemPolicyIds = @(
+    'default-layer-3-section',
+    'default-malicious-ip-block-rules',
+    'default-layer2-section'
 )
 
 # ─────────────────────────────────────────────────────────────
@@ -349,7 +359,7 @@ function Export-Groups {
     $custom = $objects | Where-Object {
       (Get-SafeProp $_ '_system_owned') -ne $true -and
       (Get-SafeProp $_ '_create_user')  -ne 'system' -and
-      $_.id -notin $pseudoSystemIds
+      $_.id -notin $pseudoSystemGroupIds
     }
 
     if (-not $custom) { Write-Log "No custom Security Groups found." WARN; return }
@@ -423,8 +433,10 @@ function Export-Profiles {
 function Export-Policies {
     Write-Log "━━━ Exporting DFW Policies ━━━" INFO
     $policies = Get-AllPages -Path "/policy/api/v1/infra/domains/$DomainId/security-policies"
-    $custom   = $policies | Where-Object { (Get-SafeProp $_ '_system_owned') -ne $true } |
-                            Sort-Object -Property sequence_number
+    $custom   = $policies | Where-Object { 
+      (Get-SafeProp $_ '_system_owned') -ne $true -and 
+      $_.Id -notin $pseudoSystemPolicyIds 
+    } | Sort-Object -Property sequence_number
 
     if (-not $custom) { Write-Log "No custom DFW Policies found." WARN; return }
 
