@@ -128,9 +128,19 @@ $ErrorActionPreference = 'Stop'
 # Groups known to be system-managed but not flagged as _system_owned.
 # These are provisioned by NSX Threat Intelligence, IDS/IPS, and related services.
 # ─────────────────────────────────────────────────────────────
-$pseudoSystemIds = @(
+$pseudoSystemGroupIds = @(
     'DefaultMaliciousIpGroup',
     'DefaultUDAGroup'
+)
+
+# ─────────────────────────────────────────────────────────────
+# Policies known to be system-managed but not flagged as _system_owned.
+# NSX will reject DELETE requests for these with a 400/403 error.
+# ─────────────────────────────────────────────────────────────
+$pseudoSystemPolicyIds = @(
+    'default-layer-3-section',
+    'default-malicious-ip-block-rules',
+    'default-layer2-section'
 )
 
 # ─────────────────────────────────────────────────────────────
@@ -268,7 +278,14 @@ $Stats = @{ Policies=0; Rules=0; Profiles=0; Groups=0; ServiceGroups=0; Services
 function Remove-Policies {
     Write-Log "━━━ Removing DFW Policies ━━━" INFO
     $policies = Get-AllPages -Path "/policy/api/v1/infra/domains/$DomainId/security-policies"
-    $custom   = $policies | Where-Object { (Get-SafeProp $_ '_system_owned') -ne $true }
+    $custom = $policies | Where-Object {
+      if ((Get-SafeProp $_ '_system_owned') -eq $true) { return $false }
+      if ($_.id -in $pseudoSystemPolicyIds) {
+        Write-Log "  Skipping protected policy: $($_.id)" WARN
+        return $false
+      }
+      return $true
+   }
 
     if (-not $custom) { Write-Log "  No custom DFW Policies found." WARN; return }
 
@@ -419,11 +436,14 @@ function Sort-GroupsForDeletion {
 
 function Remove-Groups {
     Write-Log "━━━ Removing Security Groups ━━━" INFO
-    $all    = Get-AllPages -Path "/policy/api/v1/infra/domains/$DomainId/groups"
-    $custom = $all | Where-Object {
-      (Get-SafeProp $_ '_system_owned') -ne $true -and
-      (Get-SafeProp $_ '_create_user')  -ne 'system' -and
-      $_.id -notin $pseudoSystemIds
+    $groups    = Get-AllPages -Path "/policy/api/v1/infra/domains/$DomainId/groups"
+    $custom = $groups | Where-Object {
+      if ((Get-SafeProp $_ '_system_owned') -ne $true -and (Get-SafeProp $_ '_create_user')  -ne 'system') { return $false }
+      if ($_.id -notin $pseudoSystemGroupIds) {
+        Write-Log " Skipping protected group: $($_.id)" WARN
+        return $false
+    }
+      return $true
     }
 
     if (-not $custom) { Write-Log "  No custom Security Groups found." WARN; return }
