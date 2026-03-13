@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  backend:
+    build: ./backend
+    container_name: energie-backend
+    volumes:
+      - energie-data:/data
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: energie-frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  energie-data:
