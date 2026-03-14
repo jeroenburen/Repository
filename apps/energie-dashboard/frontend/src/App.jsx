@@ -20,16 +20,32 @@ export default function App() {
   const [form, setForm] = useState({});
   const [saving, setSaving] = useState(false);
   const [notification, setNotification] = useState(null);
-  const [settings, setSettings] = useState({ tibber_token: '', goodwe_email: '', goodwe_password: '', goodwe_station_id: '', goodwe_has_password: false });
+  const [settings, setSettings] = useState({ tibber_token: '', goodwe_email: '', goodwe_password: '', goodwe_station_id: '', goodwe_inverter_ip: '', goodwe_has_password: false });
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState(null);
   const [savingSettings, setSavingSettings] = useState(false);
   const [csvModal, setCsvModal] = useState(false);
-  const [csvPreview, setCsvPreview] = useState(null);   // parsed rows before save
+  const [csvPreview, setCsvPreview] = useState(null);
   const [csvError, setCsvError] = useState(null);
   const [csvImporting, setCsvImporting] = useState(false);
+  const [liveData, setLiveData] = useState(null);
 
   useEffect(() => { loadAll(); loadSettings(); }, []);
+
+  useEffect(() => {
+    // Live data ophalen als dashboard actief is, elke 30 seconden
+    if (view !== "dashboard") return;
+    let cancelled = false;
+    async function fetchLive() {
+      try {
+        const d = await fetch(`${API}/live`).then(r => r.json());
+        if (!cancelled) setLiveData(d);
+      } catch(e) {}
+    }
+    fetchLive();
+    const interval = setInterval(fetchLive, 30_000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [view]);
 
   async function loadAll() {
     const [dataRes, yearsRes] = await Promise.all([
@@ -258,6 +274,7 @@ export default function App() {
             <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 20, letterSpacing: "-0.5px" }}>Energie Dashboard</div>
             <div style={{ fontSize: 11, color: "#607898", marginTop: 1 }}>Verbruik · Opwek · Kosten · Laadvergoeding</div>
           </div>
+          <div style={{ fontSize: 10, color: "#405060", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 6, padding: "3px 8px", fontFamily: "inherit", letterSpacing: "0.04em" }}>v1.4.0</div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           {canSync && (
@@ -292,6 +309,31 @@ export default function App() {
         {/* ===== DASHBOARD ===== */}
         {view === "dashboard" && (
           <div>
+            {/* Live omvormer widget */}
+            {liveData && liveData.available && liveData.reachable && liveData.e_day != null && (
+              <div style={{ background: "linear-gradient(135deg, rgba(0,212,160,0.08), rgba(0,128,255,0.06))", border: "1px solid rgba(0,212,160,0.25)", borderRadius: 14, padding: "16px 22px", marginBottom: 20, display: "flex", alignItems: "center", gap: 0, flexWrap: "wrap" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginRight: 32 }}>
+                  <span style={{ fontSize: 18 }}>⚡</span>
+                  <span style={{ fontSize: 11, color: "#607898", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 500 }}>Live · omvormer</span>
+                  <span style={{ fontSize: 10, color: "#304050", background: "rgba(0,212,160,0.12)", border: "1px solid rgba(0,212,160,0.2)", borderRadius: 10, padding: "2px 7px" }}>
+                    {liveData.familie || "lokaal"}
+                  </span>
+                </div>
+                {[
+                  { label: "Nu opgewekt", value: liveData.p_pv != null ? `${liveData.p_pv} W` : "–", color: "#00d4a0" },
+                  { label: "Vandaag", value: liveData.e_day != null ? `${liveData.e_day.toFixed(1)} kWh` : "–", color: "#00d4a0" },
+                  { label: "Netstroom", value: liveData.p_grid != null ? `${liveData.p_grid > 0 ? "+" : ""}${liveData.p_grid} W` : "–", color: liveData.p_grid < 0 ? "#f4a261" : "#4488ff" },
+                  { label: "Spanning", value: liveData.v_grid != null ? `${liveData.v_grid.toFixed(1)} V` : "–", color: "#9ab" },
+                  { label: "Frequentie", value: liveData.f_grid != null ? `${liveData.f_grid.toFixed(2)} Hz` : "–", color: "#9ab" },
+                  { label: "Temperatuur", value: liveData.temp != null ? `${liveData.temp.toFixed(1)} °C` : "–", color: liveData.temp > 60 ? "#e76f51" : "#9ab" },
+                ].map(({ label, value, color }) => (
+                  <div key={label} style={{ marginRight: 28, marginTop: 4 }}>
+                    <div style={{ fontSize: 10, color: "#607898", marginBottom: 2 }}>{label}</div>
+                    <div style={{ fontSize: 15, fontWeight: 600, color, fontFamily: "'Space Grotesk', sans-serif" }}>{value}</div>
+                  </div>
+                ))}
+              </div>
+            )}
             {/* KPI row 1: energie */}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 16, marginBottom: 16 }}>
               {[
@@ -543,7 +585,7 @@ export default function App() {
 
             <Section title="Tibber" icon="⚡" badge={hasTibber ? "✓ Gekoppeld" : "Niet gekoppeld"} badgeOk={hasTibber}>
               <p style={{ color: "#607898", fontSize: 12, marginBottom: 16, lineHeight: 1.7 }}>
-                Levert <strong style={{color:"#9ab"}}>verbruik (kWh) en kosten (€)</strong> per maand.<br/>
+                Levert <strong style={{color:"#9ab"}}>verbruik (kWh), teruggeleverd (kWh) en kosten (€)</strong> per maand.<br/>
                 Token ophalen via <a href="https://developer.tibber.com/explorer" target="_blank" rel="noreferrer" style={{ color: "#4488ff" }}>developer.tibber.com</a> → "Load personal token".
               </p>
               <Field label="Persoonlijk API Token">
@@ -553,12 +595,9 @@ export default function App() {
 
             <Section title="GoodWe SEMSPlus" icon="☀️" badge={hasGoodwe ? "✓ Gekoppeld" : "Niet gekoppeld"} badgeOk={hasGoodwe}>
               <p style={{ color: "#607898", fontSize: 12, marginBottom: 16, lineHeight: 1.7 }}>
-                Levert <strong style={{color:"#9ab"}}>opgewekt (kWh) en teruggeleverd (kWh)</strong> per maand.<br/>
-                De app probeert automatisch het bewezen{" "}
-                <a href="https://www.semsportal.com" target="_blank" rel="noreferrer" style={{ color: "#4488ff" }}>semsportal.com</a>{" "}
-                eerst, en schakelt daarna over op het nieuwe{" "}
-                <a href="https://semsplus.goodwe.com" target="_blank" rel="noreferrer" style={{ color: "#4488ff" }}>semsplus.goodwe.com</a>.{" "}
-                Beide MD5 en plain-text wachtwoord worden geprobeerd.<br/><br/>
+                Levert <strong style={{color:"#9ab"}}>opgewekt (kWh)</strong> per maand. Teruggeleverd wordt via Tibber opgehaald.<br/>
+                De app logt in via <code style={{fontSize:11}}>eu.semsportal.com/api/v2</code> (primair, geen x-signature),
+                met automatische terugval op oudere portals.<br/><br/>
                 <strong style={{color:"#9ab"}}>Station ID vinden in SEMSPlus:</strong> Log in → klik op je installatie → kopieer het ID uit de URL:<br/>
                 <code style={{ background: "rgba(255,255,255,0.07)", padding: "3px 8px", borderRadius: 4, fontSize: 11, display: "inline-block", marginTop: 4 }}>
                   semsplus.goodwe.com/station/<strong style={{color:"#00d4a0"}}>JOUW-ID</strong>/overview
@@ -572,6 +611,14 @@ export default function App() {
               </Field>
               <Field label="Station ID">
                 <input type="text" placeholder="12345678-abcd-1234-efgh-123456789012" value={settings.goodwe_station_id} onChange={e => setSettings(s => ({...s, goodwe_station_id: e.target.value}))} style={inputStyle} />
+              </Field>
+              <Field label="IP-adres omvormer (optioneel – voor lokale uitlezing zonder cloud)">
+                <input type="text" placeholder="192.168.1.100" value={settings.goodwe_inverter_ip} onChange={e => setSettings(s => ({...s, goodwe_inverter_ip: e.target.value}))} style={inputStyle} />
+                <div style={{ fontSize: 11, color: "#405060", marginTop: 5, lineHeight: 1.6 }}>
+                  Vul het lokale IP-adres in van je GoodWe omvormer (te vinden in je router).<br/>
+                  Gebruikt UDP poort 8899 — hetzelfde protocol als de Home Assistant integratie.<br/>
+                  Maanddata is niet lokaal beschikbaar; cloud sync blijft nodig voor historische data.
+                </div>
               </Field>
             </Section>
 
@@ -606,8 +653,8 @@ export default function App() {
             <div style={{ background: "rgba(0,128,255,0.06)", border: "1px solid rgba(0,128,255,0.18)", borderRadius: 12, padding: 20 }}>
               <div style={{ fontSize: 12, fontWeight: 600, color: "#6ab", marginBottom: 10 }}>ℹ Databronnen overzicht</div>
               <div style={{ fontSize: 12, color: "#607898", lineHeight: 1.8 }}>
-                • <strong style={{color:"#9ab"}}>Tibber</strong> → verbruik + kosten via API (automatisch)<br/>
-                • <strong style={{color:"#9ab"}}>GoodWe SEMSPlus</strong> → opgewekt + teruggeleverd via API (automatisch, met terugval op oud portal)<br/>
+                • <strong style={{color:"#9ab"}}>Tibber</strong> → verbruik, teruggeleverd + kosten via API (automatisch)<br/>
+                • <strong style={{color:"#9ab"}}>GoodWe SEMSPlus</strong> → opgewekt via API (automatisch, met terugval op oud portal)<br/>
                 • <strong style={{color:"#a78bfa"}}>Eneco eMobility</strong> → laadvergoeding handmatig invoeren (geen API)<br/>
                 • Handmatige invoer wordt nooit overschreven door sync
               </div>
