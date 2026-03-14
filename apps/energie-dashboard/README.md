@@ -12,7 +12,7 @@ Een lokale webapplicatie om je elektriciteitsverbruik, zonnepaneelopwek en koste
 # 1. Pak de map uit en open een terminal in de map energie-dashboard
 
 # 2. Start de applicatie
-docker compose up --build
+docker compose up -d --build
 
 # 3. Open je browser en ga naar:
 http://localhost:8080
@@ -20,11 +20,13 @@ http://localhost:8080
 
 De applicatie start automatisch bij elke herstart van Docker.
 Om te stoppen: `docker compose down`
+Om de applicatie te resetten: `docker compose down -v`
 
 ## Gebruik
 
 ### Dashboard
 Overzicht van het geselecteerde jaar met:
+- Actuele opwek rechtstreeks uit GoodWe inverter
 - KPI-kaarten (totaal verbruik, opgewekt, teruggeleverd, kosten)
 - Grafieken voor verbruik vs opwek, kosten per maand, teruggeleverd
 
