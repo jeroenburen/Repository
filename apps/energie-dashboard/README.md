@@ -21,6 +21,7 @@ http://localhost:8080
 De applicatie start automatisch bij elke herstart van Docker.
 Om te stoppen: `docker compose down`
 Om de applicatie te resetten: `docker compose down -v`
+Om de applicatie te bouwen/starten: `docker compose up -d --build`
 
 ## Gebruik
 
