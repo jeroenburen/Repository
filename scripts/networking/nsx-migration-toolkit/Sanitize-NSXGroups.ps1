@@ -195,7 +195,23 @@ Write-Host "  [Groups] $($idMap.Count) ID(s) need renaming." -ForegroundColor Ye
 # ---------------------------------------------------------------------------
 # 4. Helpers
 # ---------------------------------------------------------------------------
+
 function Decode-UnicodeEscapes {
+    <#
+.SYNOPSIS
+    Decodes Unicode escape sequences (e.g., \u0024) into their literal characters.
+.DESCRIPTION
+    This function uses a Regular Expression to find occurrences of '\u' followed by 
+    four hexadecimal digits. For each match, it:
+    1. Captures the 4-digit hex code (e.g., '0024').
+    2. Converts that hex string into a 32-bit Integer (Base 16).
+    3. Casts that Integer into a [char] to reveal the symbol (e.g., '$').
+.PARAMETER text
+    The string containing the Unicode escape sequences to be decoded.
+.EXAMPLE
+    Decode-UnicodeEscapes -text "The price is \u002410"
+    # Output: The price is $10
+#>
     param([string]$text)
     return [regex]::Replace($text, '\\u([0-9a-fA-F]{4})', {
         param($m)
@@ -204,6 +220,19 @@ function Decode-UnicodeEscapes {
 }
 
 function Update-GroupPaths {
+    <#
+.SYNOPSIS
+    Updates group IDs within URL paths based on a provided mapping table.
+.DESCRIPTION
+    This function iterates through a mapping object ($idMap) to replace old IDs with new ones.
+    To prevent "partial matching" (e.g., replacing '12' inside '123'), it sorts keys by length 
+    descending and uses Regex Lookarounds to ensure the ID is specifically within a '/groups/' path.
+.PARAMETER text
+    The string or document content containing the paths to be updated.
+.NOTES
+    This function assumes a global or script-scope variable `$idMap` exists (a Hashtable 
+    where keys are Old IDs and values are New IDs).
+#>
     param([string]$text)
     $sortedKeys = $idMap.Keys | Sort-Object { $_.Length } -Descending
     foreach ($oldId in $sortedKeys) {
