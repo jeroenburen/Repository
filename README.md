@@ -21,6 +21,7 @@ root/
 ├── lib/                   # Shared helper functions
 └── apps/
     └── energie-dashboard/ # Local energy monitoring app
+    └── etf-tracker/       # Tracker for ETF portfolio
 ```
 
 ---
@@ -177,6 +178,25 @@ docker compose up -d --build
 
 See [`apps/energie-dashboard/README.md`](apps/energie-dashboard/README.md) for full documentation.
 
+### 💰 ETF Tracker
+
+A local Docker-based web application for tracking an ETF portfolio.
+
+**Features:**
+- Import CSV portfolio data
+- Add manual payments
+- Charts: Return for current year and for multiple years
+
+**Requirements:** [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+
+**Quick start:**
+```bash
+cd apps/etf-tracker
+docker compose up -d --build
+# Open http://localhost:8181
+```
+
+See [`apps/etf-tracker/README.md`](apps/etf-tracker/README.md) for full documentation.
 ---
 
 ## Prerequisites
