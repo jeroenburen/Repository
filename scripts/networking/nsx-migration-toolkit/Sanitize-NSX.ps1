@@ -127,7 +127,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$GroupsFile,
-    [Parameter(Mandatory)][string]$RulesFile,
+    [string]$RulesFile,
 
     # Optional — when provided, services and service groups are sanitized in Step 2
     [string]$ServicesFile,
@@ -142,7 +142,7 @@ param(
 
     [string]$GroupsOut   = ($GroupsFile -replace '\.csv$', '_sanitized.csv'),
     [string]$ServicesOut = '',   # auto-derived below if ServicesFile is provided
-    [string]$RulesOut    = ($RulesFile  -replace '\.csv$', '_sanitized.csv'),
+    [string]$RulesOut    = '',   # auto-derived below if RulesFile is provided
     [string]$PoliciesOut = '',   # auto-derived below if PoliciesFile is provided
     [string]$ProfilesOut = '',   # auto-derived below if ProfilesFile is provided
 
@@ -165,6 +165,9 @@ if ($ServicesFile -and -not $ServiceMappingOut) {
 if ($PoliciesFile -and -not $PoliciesOut) {
     $PoliciesOut = $PoliciesFile -replace '\.csv$', '_sanitized.csv'
 }
+if ($RulesFile -and -not $RulesOut) {
+    $RulesOut = $RulesFile -replace '\.csv$', '_sanitized.csv'
+}
 if ($ProfilesFile -and -not $ProfilesOut) {
     $ProfilesOut = $ProfilesFile -replace '\.csv$', '_sanitized.csv'
 }
@@ -177,7 +180,7 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 # ---------------------------------------------------------------------------
 # Validate that input files and sibling scripts all exist before starting
 # ---------------------------------------------------------------------------
-foreach ($f in @($GroupsFile, $RulesFile)) {
+foreach ($f in @($GroupsFile)) {
     if (-not (Test-Path $f)) {
         Write-Error "Input file not found: $f"
         exit 1
@@ -191,6 +194,11 @@ if ($ServicesFile -and -not (Test-Path $ServicesFile)) {
 
 if ($PoliciesFile -and -not (Test-Path $PoliciesFile)) {
     Write-Error "Input file not found: $PoliciesFile"
+    exit 1
+}
+
+if ($RulesFile -and -not (Test-Path $RulesFile)) {
+    Write-Error "Input file not found: $RulesFile"
     exit 1
 }
 
@@ -258,7 +266,7 @@ if ($ServicesFile) {
 }
 
 # ---------------------------------------------------------------------------
-# Step 3 (or Step 2 when no services file) — Update firewall rules and policies
+# Step 3 — Update firewall rules and policies (optional)
 #
 # We pass the live $groupIdMap hashtable rather than the CSV so this step
 # doesn't need to re-read from disk. PoliciesFile is passed when provided;
@@ -267,22 +275,24 @@ if ($ServicesFile) {
 $ruleStepNumber = if ($ServicesFile) { 3 } else { 2 }
 $totalSteps     = $ruleStepNumber + $(if ($ProfilesFile) { 1 } else { 0 })
 
-Write-Host ""
-Write-Host "Step $ruleStepNumber/$totalSteps — Sanitizing firewall rules and policies..." -ForegroundColor Magenta
+if ($RulesFile) {
+    Write-Host ""
+    Write-Host "Step $ruleStepNumber/$totalSteps — Sanitizing firewall rules and policies..." -ForegroundColor Magenta
 
-$step3Params = @{
-    RulesFile    = $RulesFile
-    RulesOut     = $RulesOut
-    IdMap        = $groupIdMap
-    ServiceIdMap = $serviceIdMap
+    $step3Params = @{
+        RulesFile    = $RulesFile
+        RulesOut     = $RulesOut
+        IdMap        = $groupIdMap
+        ServiceIdMap = $serviceIdMap
+    }
+
+    if ($PoliciesFile) {
+        $step3Params['PoliciesFile'] = $PoliciesFile
+        $step3Params['PoliciesOut']  = $PoliciesOut
+    }
+
+    & "$scriptDir\Sanitize-NSXFirewallRules.ps1" @step3Params
 }
-
-if ($PoliciesFile) {
-    $step3Params['PoliciesFile'] = $PoliciesFile
-    $step3Params['PoliciesOut']  = $PoliciesOut
-}
-
-& "$scriptDir\Sanitize-NSXFirewallRules.ps1" @step3Params
 
 # ---------------------------------------------------------------------------
 # Step 4 — Sanitize Context Profiles (optional)

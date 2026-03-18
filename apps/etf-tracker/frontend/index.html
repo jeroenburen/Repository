@@ -1,0 +1,671 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ETF Portefeuille Tracker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0c0f0a; --surface: #13180f; --surface2: #1a2114; --border: #2a3520;
+    --accent: #a8e063; --accent2: #5fb832;
+    --text: #e8f0e0; --text-muted: #7a9060; --text-dim: #4a5a38;
+    --red: #e05555; --orange: #e09940; --green: #5ecf6a; --yellow: #e0c040;
+    --mono: 'DM Mono', monospace; --sans: 'DM Sans', sans-serif; --display: 'Syne', sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 14px; min-height: 100vh; }
+  body::before {
+    content: ''; position: fixed; inset: 0;
+    background-image: radial-gradient(ellipse at 20% 0%, rgba(168,224,99,0.04) 0%, transparent 60%),
+      radial-gradient(ellipse at 80% 100%, rgba(95,184,50,0.03) 0%, transparent 60%);
+    pointer-events: none; z-index: 0;
+  }
+  .app { position: relative; z-index: 1; max-width: 1400px; margin: 0 auto; padding: 24px; }
+  header { display: flex; align-items: center; justify-content: space-between; padding-bottom: 24px; border-bottom: 1px solid var(--border); margin-bottom: 32px; }
+  .logo { font-family: var(--display); font-size: 22px; font-weight: 800; letter-spacing: -0.5px; }
+  .logo span { color: var(--accent); }
+  .header-meta { font-family: var(--mono); font-size: 11px; color: var(--text-muted); text-align: right; }
+  .tabs { display: flex; gap: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 4px; margin-bottom: 28px; width: fit-content; }
+  .tab-btn { font-family: var(--display); font-size: 12px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; padding: 8px 20px; border: none; border-radius: 5px; cursor: pointer; background: transparent; color: var(--text-muted); transition: all 0.2s; }
+  .tab-btn.active { background: var(--accent); color: var(--bg); }
+  .tab-btn:hover:not(.active) { color: var(--text); background: var(--surface2); }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; }
+  .card-title { font-family: var(--display); font-size: 11px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 20px; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .kpi-strip { display: flex; gap: 2px; margin-bottom: 20px; }
+  .kpi { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
+  .kpi-label { font-family: var(--mono); font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 8px; }
+  .kpi-value { font-family: var(--display); font-size: 26px; font-weight: 700; color: var(--text); letter-spacing: -1px; }
+  .kpi-value.accent { color: var(--accent); }
+  .kpi-sub { font-family: var(--mono); font-size: 10px; color: var(--text-dim); margin-top: 4px; }
+  .upload-btn { display: flex; align-items: center; gap: 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 16px; cursor: pointer; transition: all 0.2s; white-space: nowrap; }
+  .upload-btn:hover, .upload-btn.drag { border-color: var(--accent); background: var(--surface2); }
+  .upload-btn-icon { font-size: 15px; }
+  .upload-btn-label { font-family: var(--display); font-size: 12px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); }
+  .upload-btn:hover .upload-btn-label { color: var(--accent); }
+  .pos-table { width: 100%; border-collapse: collapse; }
+  .pos-table th { font-family: var(--mono); font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.1em; padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+  .pos-table td { padding: 14px 12px; border-bottom: 1px solid rgba(42,53,32,0.5); font-family: var(--mono); font-size: 13px; }
+  .pos-table tr:last-child td { border-bottom: none; }
+  .pos-table tr:hover td { background: var(--surface2); }
+  .product-name { font-family: var(--sans); font-weight: 500; color: var(--text); font-size: 14px; }
+  .mono-val { color: var(--accent); }
+  .eur-val { color: var(--text-muted); }
+  .dev-bar-wrap { display: flex; align-items: center; gap: 8px; }
+  .dev-bar { height: 6px; border-radius: 3px; background: var(--surface2); flex: 1; position: relative; overflow: hidden; }
+  .dev-fill { height: 100%; border-radius: 3px; transition: width 0.4s; }
+  .dev-text { font-family: var(--mono); font-size: 11px; min-width: 50px; text-align: right; }
+  .dev-ok .dev-fill { background: var(--accent); } .dev-ok .dev-text { color: var(--accent); }
+  .dev-warn .dev-fill { background: var(--yellow); } .dev-warn .dev-text { color: var(--yellow); }
+  .dev-alert .dev-fill { background: var(--orange); } .dev-alert .dev-text { color: var(--orange); }
+  .dev-danger .dev-fill { background: var(--red); } .dev-danger .dev-text { color: var(--red); }
+  .target-input { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; color: var(--text); font-family: var(--mono); font-size: 12px; width: 80px; text-align: center; outline: none; transition: border-color 0.2s; }
+  .target-input:focus { border-color: var(--accent); }
+  .chart-wrap { position: relative; height: 300px; }
+  .dep-form { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 24px; }
+  .form-group { display: flex; flex-direction: column; gap: 6px; }
+  .form-label { font-family: var(--mono); font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.1em; }
+  .form-input { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; color: var(--text); font-family: var(--mono); font-size: 13px; outline: none; transition: border-color 0.2s; }
+  .form-input:focus { border-color: var(--accent); }
+  .btn { font-family: var(--display); font-size: 12px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; padding: 10px 20px; border: none; border-radius: 8px; cursor: pointer; transition: all 0.2s; }
+  .btn-primary { background: var(--accent); color: var(--bg); }
+  .btn-primary:hover { background: var(--accent2); }
+  .btn-danger { background: transparent; border: 1px solid var(--red); color: var(--red); padding: 4px 10px; font-size: 10px; }
+  .btn-danger:hover { background: var(--red); color: white; }
+  .dep-table { width: 100%; border-collapse: collapse; }
+  .dep-table th { font-family: var(--mono); font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.1em; padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+  .dep-table td { padding: 12px; font-family: var(--mono); font-size: 12px; border-bottom: 1px solid rgba(42,53,32,0.4); }
+  .dep-table tr:last-child td { border-bottom: none; }
+  .weight-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-family: var(--mono); background: rgba(168,224,99,0.1); color: var(--accent); border: 1px solid rgba(168,224,99,0.2); }
+  .year-select { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 14px; color: var(--text); font-family: var(--mono); font-size: 12px; cursor: pointer; outline: none; }
+  .year-select:focus { border-color: var(--accent); }
+  .summary-row td { border-top: 1px solid var(--border) !important; font-weight: 500; color: var(--text); }
+  .toast { position: fixed; bottom: 24px; right: 24px; background: var(--surface); border: 1px solid var(--accent); border-radius: 10px; padding: 14px 20px; font-family: var(--mono); font-size: 12px; color: var(--accent); transform: translateY(80px); opacity: 0; transition: all 0.3s; z-index: 9999; }
+  .toast.show { transform: translateY(0); opacity: 1; }
+  .donut-wrap { height: 260px; position: relative; }
+  .empty { text-align: center; padding: 48px; color: var(--text-dim); font-family: var(--mono); font-size: 12px; }
+  .empty-icon { font-size: 40px; margin-bottom: 12px; }
+  .calc-table td { padding: 10px 12px; border-bottom: 1px solid rgba(42,53,32,0.4); font-family: var(--mono); font-size: 13px; }
+  .calc-table tr:last-child td { border-bottom: none; }
+  @media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } .kpi-strip { flex-wrap: wrap; } .dep-form { gap: 8px; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="logo">ETF<span>.</span>Tracker</div>
+    <div class="header-meta" id="last-update">Geen data geladen</div>
+  </header>
+
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:28px;">
+    <div class="tabs" style="margin-bottom:0;">
+      <button class="tab-btn active" onclick="switchTab('dashboard')">Dashboard</button>
+      <button class="tab-btn" onclick="switchTab('stortingen')">Stortingen</button>
+      <button class="tab-btn" onclick="switchTab('rendement')">Rendement</button>
+      <button class="tab-btn" onclick="switchTab('verloop')">Verloop</button>
+    </div>
+    <div class="upload-btn" id="upload-zone"
+         onclick="document.getElementById('csv-input').click()"
+         ondragover="event.preventDefault();this.classList.add('drag')"
+         ondragleave="this.classList.remove('drag')"
+         ondrop="handleDrop(event)">
+      <span class="upload-btn-icon">📂</span>
+      <span class="upload-btn-label">Importeer CSV</span>
+    </div>
+    <input type="file" id="csv-input" accept=".csv" style="display:none" onchange="handleFile(this.files[0])">
+  </div>
+
+  <!-- DASHBOARD -->
+  <div id="tab-dashboard" class="tab-panel active">
+    <div class="kpi-strip">
+      <div class="kpi"><div class="kpi-label">Totaal Vermogen</div><div class="kpi-value accent" id="kpi-total">—</div><div class="kpi-sub">Laatste import</div></div>
+      <div class="kpi"><div class="kpi-label">Aantal Posities</div><div class="kpi-value" id="kpi-positions">—</div><div class="kpi-sub">ETF posities</div></div>
+      <div class="kpi"><div class="kpi-label">Gewogen Inleg YTD</div><div class="kpi-value" id="kpi-weighted">—</div><div class="kpi-sub">Huidig jaar</div></div>
+      <div class="kpi"><div class="kpi-label">Stortingen YTD</div><div class="kpi-value" id="kpi-deposits-count">—</div><div class="kpi-sub">Huidig jaar</div></div>
+    </div>
+
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-title">Posities &amp; Allocatie</div>
+        <div id="positions-content"><div class="empty"><div class="empty-icon">📊</div>Importeer een CSV om posities te zien</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Verdeling</div>
+        <div class="donut-wrap"><canvas id="donut-chart"></canvas></div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:20px;">
+      <div class="card-title">Rendement per jaar</div>
+      <div class="chart-wrap"><canvas id="rendement-chart"></canvas></div>
+    </div>
+  </div>
+
+  <!-- STORTINGEN -->
+  <div id="tab-stortingen" class="tab-panel">
+    <div class="card" style="margin-bottom:20px;">
+      <div class="card-title">Nieuwe Storting Toevoegen</div>
+      <div class="dep-form">
+        <div class="form-group"><label class="form-label">Jaar</label><input type="number" class="form-input" id="dep-year" style="width:90px" min="2020" max="2099"></div>
+        <div class="form-group"><label class="form-label">Maand</label>
+          <select class="form-input" id="dep-month" style="width:130px">
+            <option value="1">Januari</option><option value="2">Februari</option><option value="3">Maart</option>
+            <option value="4">April</option><option value="5">Mei</option><option value="6">Juni</option>
+            <option value="7">Juli</option><option value="8">Augustus</option><option value="9">September</option>
+            <option value="10">Oktober</option><option value="11">November</option><option value="12">December</option>
+          </select>
+        </div>
+        <div class="form-group"><label class="form-label">Dag</label><input type="number" class="form-input" id="dep-day" value="1" style="width:80px" min="1" max="31"></div>
+        <div class="form-group"><label class="form-label">Bedrag (€)</label><input type="number" class="form-input" id="dep-amount" placeholder="500.00" style="width:140px" step="0.01"></div>
+        <div class="form-group"><label class="form-label">Notitie (opt.)</label><input type="text" class="form-input" id="dep-note" placeholder="Maandelijkse inleg" style="width:200px"></div>
+        <button class="btn btn-primary" onclick="addDeposit()">Toevoegen</button>
+      </div>
+    </div>
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+        <div class="card-title" style="margin-bottom:0">Stortingen Overzicht</div>
+        <div style="display:flex;align-items:center;gap:12px;">
+          <span style="font-family:var(--mono);font-size:11px;color:var(--text-muted);">Jaar:</span>
+          <select class="year-select" id="year-select" onchange="loadDeposits()"></select>
+        </div>
+      </div>
+      <div id="deposits-content"><div class="empty"><div class="empty-icon">💰</div>Nog geen stortingen</div></div>
+    </div>
+  </div>
+
+  <!-- RENDEMENT -->
+  <div id="tab-rendement" class="tab-panel">
+    <div class="kpi-strip" style="margin-bottom:20px;">
+      <div class="kpi"><div class="kpi-label">Rendement</div><div class="kpi-value" id="rend-pct">—</div><div class="kpi-sub">Modified Dietz</div></div>
+      <div class="kpi"><div class="kpi-label">Absolute Winst/Verlies</div><div class="kpi-value" id="rend-abs">—</div><div class="kpi-sub">Eind − Begin − Stortingen</div></div>
+      <div class="kpi"><div class="kpi-label">Beginsaldo</div><div class="kpi-value" id="rend-begin-kpi">—</div><div class="kpi-sub">1 januari</div></div>
+      <div class="kpi"><div class="kpi-label">Eindsaldo</div><div class="kpi-value accent" id="rend-eind-kpi">—</div><div class="kpi-sub">31 december / huidig</div></div>
+    </div>
+    <div class="grid-2" style="margin-bottom:20px;">
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+          <div class="card-title" style="margin-bottom:0">Begin- &amp; Eindsaldo</div>
+          <select class="year-select" id="rend-year-select" onchange="loadRendement()"></select>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:16px;">
+          <div class="form-group">
+            <label class="form-label">Beginsaldo (€) — waarde op 1 januari</label>
+            <input type="number" class="form-input" id="saldo-begin" placeholder="0.00" step="0.01">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Eindsaldo (€) — waarde op 31 december / huidig</label>
+            <input type="number" class="form-input" id="saldo-eind" placeholder="0.00" step="0.01">
+          </div>
+          <div style="display:flex;gap:10px;">
+            <button class="btn btn-primary" onclick="saveSaldi()" style="flex:1">Opslaan &amp; Berekenen</button>
+            <button class="btn" onclick="prefillFromSnapshot()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text-muted);font-size:11px;padding:10px 14px;">↓ Uit CSV</button>
+          </div>
+          <div id="saldi-hint" style="font-family:var(--mono);font-size:11px;color:var(--text-dim);line-height:1.6;"></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">Berekening</div>
+        <div id="rendement-berekening"><div class="empty" style="padding:24px;"><div class="empty-icon" style="font-size:28px;">🧮</div>Vul begin- en eindsaldo in</div></div>
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:20px;">
+      <div class="card-title">Stortingen <span id="rend-jaar-label" style="color:var(--accent)"></span></div>
+      <div id="rendement-content"><div class="empty"><div class="empty-icon">📈</div>Voeg stortingen toe om rendement te berekenen</div></div>
+    </div>
+  </div>
+
+  <!-- VERLOOP -->
+  <div id="tab-verloop" class="tab-panel">
+    <div class="card">
+      <div class="card-title">Vermogensverloop</div>
+      <div class="chart-wrap"><canvas id="wealth-chart"></canvas></div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const API = '/api';
+let positions = [], targets = {};
+let donutChart = null, wealthChart = null, rendementChart = null;
+
+window.onload = async () => {
+  const now = new Date();
+  document.getElementById('dep-year').value = now.getFullYear();
+  document.getElementById('dep-month').value = now.getMonth() + 1;
+  document.getElementById('dep-day').value = now.getDate();
+  await loadTargets();
+  await loadLatestSnapshot();
+  await populateYears();
+  await loadDeposits();
+  await loadWealthChart();
+  const saldiRes = await fetch(API + '/year-saldi');
+  const allSaldi = await saldiRes.json();
+  await renderRendementChart(allSaldi);
+};
+
+function switchTab(name) {
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  event.target.classList.add('active');
+  if (name === 'verloop') loadWealthChart();
+  if (name === 'rendement') loadRendement();
+}
+
+function toast(msg, isErr=false) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.borderColor = isErr ? 'var(--red)' : 'var(--accent)';
+  t.style.color = isErr ? 'var(--red)' : 'var(--accent)';
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+function handleDrop(e) {
+  e.preventDefault();
+  document.getElementById('upload-zone').classList.remove('drag');
+  const file = e.dataTransfer.files[0];
+  if (file) handleFile(file);
+}
+
+async function handleFile(file) {
+  if (!file) return;
+  const fd = new FormData();
+  fd.append('file', file);
+  try {
+    const res = await fetch(API + '/upload-csv', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (data.error) { toast(data.error, true); return; }
+    positions = data.positions;
+    renderPositions(); renderDonut();
+    document.getElementById('kpi-total').textContent = '€' + data.total.toLocaleString('nl-NL', {minimumFractionDigits:2, maximumFractionDigits:2});
+    document.getElementById('kpi-positions').textContent = positions.length;
+    document.getElementById('last-update').textContent = 'Bijgewerkt: ' + new Date().toLocaleString('nl-NL');
+    await loadWealthChart();
+    toast('CSV succesvol geïmporteerd!');
+  } catch(e) { toast('Fout bij importeren: ' + e.message, true); }
+}
+
+async function loadTargets() {
+  try {
+    const res = await fetch(API + '/targets');
+    const data = await res.json();
+    data.forEach(t => targets[t.product] = t.target_pct);
+  } catch(e) {}
+}
+
+async function loadLatestSnapshot() {
+  try {
+    const res = await fetch(API + '/snapshots/latest');
+    const data = await res.json();
+    if (!data) return;
+    positions = data.positions;
+    renderPositions(); renderDonut();
+    document.getElementById('kpi-total').textContent = '€' + data.total_value.toLocaleString('nl-NL', {minimumFractionDigits:2, maximumFractionDigits:2});
+    document.getElementById('kpi-positions').textContent = positions.length;
+    const d = new Date(data.snapshot_date);
+    document.getElementById('last-update').textContent = 'Bijgewerkt: ' + d.toLocaleString('nl-NL');
+  } catch(e) {}
+}
+
+function renderPositions() {
+  if (!positions.length) return;
+  let html = `<table class="pos-table"><thead><tr><th>Product</th><th>Waarde</th><th>Huidig %</th><th>Doel %</th><th>Afwijking</th></tr></thead><tbody>`;
+  positions.forEach(p => {
+    const target = targets[p.product] || 0;
+    const dev = p.pct - target;
+    const absdev = Math.abs(dev);
+    let cls = absdev > 10 ? 'dev-danger' : absdev > 5 ? 'dev-alert' : absdev > 2 ? 'dev-warn' : 'dev-ok';
+    const barPct = Math.min(absdev * 4, 100);
+    html += `<tr>
+      <td><span class="product-name">${p.product}</span></td>
+      <td class="eur-val">€${p.waarde.toLocaleString('nl-NL',{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
+      <td class="mono-val">${p.pct.toFixed(1)}%</td>
+      <td><input type="number" class="target-input" value="${target||''}" placeholder="0"
+        onchange="saveTarget('${p.product.replace(/'/g,"\\'")}', this.value)" step="0.5" min="0" max="100"></td>
+      <td><div class="dev-bar-wrap ${cls}">
+        <div class="dev-bar"><div class="dev-fill" style="width:${barPct}%"></div></div>
+        <span class="dev-text">${dev>=0?'+':''}${dev.toFixed(1)}%</span>
+      </div></td>
+    </tr>`;
+  });
+  html += `</tbody></table>`;
+  document.getElementById('positions-content').innerHTML = html;
+}
+
+async function saveTarget(product, value) {
+  const pct = parseFloat(value);
+  if (isNaN(pct)) return;
+  targets[product] = pct;
+  await fetch(API + '/targets', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({product, target_pct: pct}) });
+  renderPositions();
+  toast('Doelgewicht opgeslagen');
+}
+
+const COLORS = ['#a8e063','#5b8af5','#f5a623','#e05555','#b48ef7','#5ecfcf','#f5d76e','#e07c5b','#5bcfa8','#c8f083'];
+
+function renderDonut() {
+  if (!positions.length) return;
+  const ctx = document.getElementById('donut-chart').getContext('2d');
+  if (donutChart) donutChart.destroy();
+  donutChart = new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      labels: positions.map(p => p.product),
+      datasets: [{ data: positions.map(p => p.waarde), backgroundColor: COLORS.slice(0, positions.length), borderColor: '#0c0f0a', borderWidth: 3, hoverOffset: 8 }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, cutout: '65%',
+      plugins: {
+        legend: { position: 'bottom', labels: { color: '#7a9060', font: {family:'DM Mono',size:10}, padding: 12, boxWidth: 10 } },
+        tooltip: {
+          callbacks: { label: ctx => {
+            const total = ctx.dataset.data.reduce((a, b) => a + b, 0);
+            const pct = total > 0 ? (ctx.raw / total * 100).toFixed(1) : '0.0';
+            return ` ${ctx.label}: €${ctx.raw.toLocaleString('nl-NL',{maximumFractionDigits:0})} (${pct}%)`;
+          }},
+          backgroundColor: '#13180f', borderColor: '#2a3520', borderWidth: 1, titleColor: '#e8f0e0', bodyColor: '#7a9060',
+          titleFont: {family:'Syne'}, bodyFont: {family:'DM Mono',size:11}
+        }
+      }
+    }
+  });
+}
+
+// ---- STORTINGEN ----
+async function populateYears() {
+  const res = await fetch(API + '/deposits/years');
+  const depositYears = await res.json();
+  const currentYear = new Date().getFullYear();
+
+  // Stortingen dropdown: alleen jaren met stortingen
+  const depSel = document.getElementById('year-select');
+  if (depSel) {
+    depSel.innerHTML = '';
+    depositYears.forEach(y => {
+      const o = document.createElement('option');
+      o.value = y; o.textContent = y;
+      if (y == currentYear) o.selected = true;
+      depSel.appendChild(o);
+    });
+  }
+
+  // Rendement dropdown: vaste range 2021 t/m huidig jaar
+  const rendSel = document.getElementById('rend-year-select');
+  if (rendSel) {
+    rendSel.innerHTML = '';
+    for (let y = currentYear; y >= 2021; y--) {
+      const o = document.createElement('option');
+      o.value = y; o.textContent = y;
+      if (y == currentYear) o.selected = true;
+      rendSel.appendChild(o);
+    }
+  }
+}
+
+async function loadDeposits() {
+  const year = document.getElementById('year-select')?.value || new Date().getFullYear();
+  try {
+    const res = await fetch(API + '/deposits?year=' + year);
+    const deps = await res.json();
+    renderDeposits(deps);
+    if (year == new Date().getFullYear()) {
+      document.getElementById('kpi-weighted').textContent = '€' + deps.reduce((s,d)=>s+d.weighted_amount,0).toLocaleString('nl-NL',{minimumFractionDigits:2,maximumFractionDigits:2});
+      document.getElementById('kpi-deposits-count').textContent = deps.length;
+    }
+  } catch(e) {}
+}
+
+function renderDeposits(deps) {
+  if (!deps.length) { document.getElementById('deposits-content').innerHTML = '<div class="empty"><div class="empty-icon">💰</div>Nog geen stortingen dit jaar</div>'; return; }
+  const months = ['','Jan','Feb','Mrt','Apr','Mei','Jun','Jul','Aug','Sep','Okt','Nov','Dec'];
+  let sumA = 0, sumW = 0;
+  let html = `<table class="dep-table"><thead><tr><th>Datum</th><th>Bedrag</th><th>Weging</th><th>Gewogen Inleg</th><th>Notitie</th><th></th></tr></thead><tbody>`;
+  deps.forEach(d => {
+    sumA += d.amount; sumW += d.weighted_amount;
+    const w = d.amount > 0 ? (d.weighted_amount/d.amount).toFixed(4) : '0';
+    html += `<tr>
+      <td style="color:var(--text)">${d.day} ${months[d.month]} ${d.year}</td>
+      <td style="color:var(--accent)">€${d.amount.toLocaleString('nl-NL',{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
+      <td><span class="weight-badge">${w}</span></td>
+      <td style="color:var(--text-muted)">€${d.weighted_amount.toLocaleString('nl-NL',{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
+      <td style="color:var(--text-dim)">${d.note||'—'}</td>
+      <td><button class="btn btn-danger" onclick="deleteDeposit(${d.id})">✕</button></td>
+    </tr>`;
+  });
+  html += `</tbody><tfoot><tr class="summary-row">
+    <td style="color:var(--text-muted);font-family:var(--mono);font-size:11px;">Totaal</td>
+    <td style="color:var(--accent)">€${sumA.toLocaleString('nl-NL',{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
+    <td></td>
+    <td style="color:var(--text)">€${sumW.toLocaleString('nl-NL',{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
+    <td></td><td></td>
+  </tr></tfoot></table>`;
+  document.getElementById('deposits-content').innerHTML = html;
+}
+
+async function addDeposit() {
+  const year = parseInt(document.getElementById('dep-year').value);
+  const month = parseInt(document.getElementById('dep-month').value);
+  const day = parseInt(document.getElementById('dep-day').value);
+  const amount = parseFloat(document.getElementById('dep-amount').value);
+  const note = document.getElementById('dep-note').value;
+  if (!amount || amount <= 0) { toast('Voer een geldig bedrag in', true); return; }
+  const res = await fetch(API + '/deposits', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({year,month,day,amount,note}) });
+  const data = await res.json();
+  if (data.success) {
+    toast(`Storting toegevoegd — weging: ${data.weight}`);
+    document.getElementById('dep-amount').value = '';
+    document.getElementById('dep-note').value = '';
+    await populateYears();
+    document.getElementById('year-select').value = year;
+    await loadDeposits();
+  }
+}
+
+async function deleteDeposit(id) {
+  await fetch(API + '/deposits/' + id, {method:'DELETE'});
+  await loadDeposits();
+  toast('Storting verwijderd');
+}
+
+// ---- RENDEMENT ----
+async function loadRendement() {
+  const yearSel = document.getElementById('rend-year-select');
+  if (!yearSel) return;
+  const year = parseInt(yearSel.value) || new Date().getFullYear();
+  document.getElementById('rend-jaar-label').textContent = year;
+
+  const depsRes = await fetch(API + '/deposits?year=' + year);
+  const deps = await depsRes.json();
+  const totalInleg = deps.reduce((s,d) => s+d.amount, 0);
+  const totalWeighted = deps.reduce((s,d) => s+d.weighted_amount, 0);
+
+  const saldiRes = await fetch(API + '/year-saldi');
+  const allSaldi = await saldiRes.json();
+  const saldo = allSaldi.find(s => s.year === year);
+
+  document.getElementById('saldo-begin').value = saldo?.begin_waarde ?? '';
+  document.getElementById('saldo-eind').value = saldo?.eind_waarde ?? '';
+
+  const beginWaarde = saldo?.begin_waarde ?? null;
+  const eindWaarde = saldo?.eind_waarde ?? null;
+  const fmt = v => '€' + v.toLocaleString('nl-NL', {minimumFractionDigits:2, maximumFractionDigits:2});
+
+  document.getElementById('rend-begin-kpi').textContent = beginWaarde !== null ? fmt(beginWaarde) : '—';
+  document.getElementById('rend-eind-kpi').textContent = eindWaarde !== null ? fmt(eindWaarde) : '—';
+
+  const hint = document.getElementById('saldi-hint');
+  hint.textContent = (beginWaarde === null && eindWaarde === null)
+    ? 'Tip: voor het eerste beleggingsjaar kun je het beginsaldo op €0 zetten.'
+    : '';
+
+  // Modified Dietz
+  let rendPct = null, absWinst = null;
+  if (beginWaarde !== null && eindWaarde !== null) {
+    const denom = beginWaarde + totalWeighted;
+    if (denom > 0) {
+      absWinst = eindWaarde - beginWaarde - totalInleg;
+      rendPct = (absWinst / denom) * 100;
+    }
+  }
+
+  // KPI update
+  if (rendPct !== null) {
+    const color = rendPct >= 0 ? 'var(--green)' : 'var(--red)';
+    document.getElementById('rend-pct').textContent = (rendPct>=0?'+':'') + rendPct.toFixed(2) + '%';
+    document.getElementById('rend-pct').style.color = color;
+    document.getElementById('rend-abs').textContent = (absWinst>=0?'+€':'-€') + Math.abs(absWinst).toLocaleString('nl-NL',{minimumFractionDigits:2,maximumFractionDigits:2});
+    document.getElementById('rend-abs').style.color = color;
+  } else {
+    ['rend-pct','rend-abs'].forEach(id => { document.getElementById(id).textContent='—'; document.getElementById(id).style.color='var(--text)'; });
+  }
+
+  // Berekening card
+  const calc = document.getElementById('rendement-berekening');
+  if (beginWaarde !== null && eindWaarde !== null) {
+    const denom = beginWaarde + totalWeighted;
+    calc.innerHTML = `<table class="calc-table" style="width:100%">
+      <tr><td style="color:var(--text-muted)">Beginsaldo <span style="color:var(--text-dim)">(B)</span></td><td style="text-align:right;font-family:var(--mono);color:var(--text)">${fmt(beginWaarde)}</td></tr>
+      <tr><td style="color:var(--text-muted)">Eindsaldo <span style="color:var(--text-dim)">(E)</span></td><td style="text-align:right;font-family:var(--mono);color:var(--accent)">${fmt(eindWaarde)}</td></tr>
+      <tr><td style="color:var(--text-muted)">Totale stortingen <span style="color:var(--text-dim)">(C)</span></td><td style="text-align:right;font-family:var(--mono);color:var(--text-muted)">${fmt(totalInleg)}</td></tr>
+      <tr><td style="color:var(--text-muted)">Gewogen stortingen <span style="color:var(--text-dim)">(W)</span></td><td style="text-align:right;font-family:var(--mono);color:var(--text-muted)">${fmt(totalWeighted)}</td></tr>
+      <tr><td style="color:var(--text-muted)">Noemer <span style="color:var(--text-dim)">(B+W)</span></td><td style="text-align:right;font-family:var(--mono);color:var(--text-muted)">${fmt(denom)}</td></tr>
+      <tr style="border-top:2px solid var(--border)"><td style="color:var(--text-dim);font-size:11px;font-family:var(--mono)" colspan="2">(E − B − C) / (B + W)</td></tr>
+      ${rendPct!==null?`<tr><td style="color:var(--text);font-weight:600">Rendement</td>
+        <td style="text-align:right;font-family:var(--mono);font-size:22px;font-weight:700;color:${rendPct>=0?'var(--green)':'var(--red)'}">${rendPct>=0?'+':''}${rendPct.toFixed(2)}%</td></tr>`:''}
+    </table>`;
+  } else {
+    calc.innerHTML = '<div class="empty" style="padding:24px;"><div class="empty-icon" style="font-size:28px;">🧮</div>Vul begin- en eindsaldo in</div>';
+  }
+
+  // Deposits table
+  if (!deps.length) {
+    document.getElementById('rendement-content').innerHTML = '<div class="empty"><div class="empty-icon">💰</div>Nog geen stortingen dit jaar</div>';
+  } else {
+    const months = ['','Jan','Feb','Mrt','Apr','Mei','Jun','Jul','Aug','Sep','Okt','Nov','Dec'];
+    let html = `<table class="dep-table"><thead><tr><th>Datum</th><th>Storting</th><th>Weging</th><th>Gewogen inleg</th></tr></thead><tbody>`;
+    deps.forEach(d => {
+      const w = d.amount>0 ? (d.weighted_amount/d.amount).toFixed(4) : '0';
+      html += `<tr>
+        <td style="color:var(--text)">${d.day} ${months[d.month]} ${d.year}</td>
+        <td style="color:var(--accent)">€${d.amount.toLocaleString('nl-NL',{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
+        <td><span class="weight-badge">${w}</span></td>
+        <td style="color:var(--text-muted)">€${d.weighted_amount.toLocaleString('nl-NL',{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
+      </tr>`;
+    });
+    const totalW = deps.reduce((s,d)=>s+d.weighted_amount,0);
+    html += `</tbody><tfoot><tr class="summary-row">
+      <td style="color:var(--text-muted);font-family:var(--mono);font-size:11px;">Totaal</td>
+      <td style="color:var(--accent)">€${totalInleg.toLocaleString('nl-NL',{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
+      <td></td>
+      <td style="color:var(--text)">€${totalW.toLocaleString('nl-NL',{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
+    </tr></tfoot></table>`;
+    document.getElementById('rendement-content').innerHTML = html;
+  }
+
+  await renderRendementChart(allSaldi);
+}
+
+async function saveSaldi() {
+  const year = parseInt(document.getElementById('rend-year-select').value);
+  const begin = parseFloat(document.getElementById('saldo-begin').value);
+  const eind = parseFloat(document.getElementById('saldo-eind').value);
+  if (isNaN(begin) || isNaN(eind)) { toast('Vul beide saldi in', true); return; }
+  await fetch(API + '/year-saldi', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({year, begin_waarde: begin, eind_waarde: eind}) });
+  toast('Saldi opgeslagen!');
+  await loadRendement();
+}
+
+async function prefillFromSnapshot() {
+  const year = parseInt(document.getElementById('rend-year-select').value);
+  const res = await fetch(API + '/snapshots');
+  const snaps = await res.json();
+  const yearSnaps = snaps.filter(s => s.snapshot_date.startsWith(year + '-'));
+  if (!yearSnaps.length) { toast('Geen CSV-import gevonden voor ' + year, true); return; }
+  document.getElementById('saldo-begin').value = yearSnaps[0].total_value.toFixed(2);
+  document.getElementById('saldo-eind').value = yearSnaps[yearSnaps.length-1].total_value.toFixed(2);
+  toast('Ingevuld vanuit CSV-import — controleer en sla op');
+}
+
+async function renderRendementChart(allSaldi) {
+  const ctx = document.getElementById('rendement-chart').getContext('2d');
+  if (rendementChart) rendementChart.destroy();
+  const currentYear = new Date().getFullYear();
+  const barData = [];
+  // Loop all years 2021..now, use saved saldi where available
+  for (let y = 2021; y <= currentYear; y++) {
+    const s = allSaldi.find(s => s.year === y);
+    if (!s || s.begin_waarde === null || s.eind_waarde === null) continue;
+    const depsRes = await fetch(API + '/deposits?year=' + y);
+    const deps = await depsRes.json();
+    const totalInleg = deps.reduce((a,d)=>a+d.amount,0);
+    const totalWeighted = deps.reduce((a,d)=>a+d.weighted_amount,0);
+    const denom = s.begin_waarde + totalWeighted;
+    if (denom <= 0) continue;
+    barData.push({ year: y, pct: ((s.eind_waarde - s.begin_waarde - totalInleg) / denom) * 100 });
+  }
+  if (!barData.length) return;
+  rendementChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: barData.map(d => d.year),
+      datasets: [{ data: barData.map(d => parseFloat(d.pct.toFixed(2))),
+        backgroundColor: barData.map(d => d.pct>=0?'rgba(94,207,106,0.7)':'rgba(224,85,85,0.7)'),
+        borderColor: barData.map(d => d.pct>=0?'#5ecf6a':'#e05555'),
+        borderWidth: 1, borderRadius: 4 }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend:{display:false}, tooltip: {
+        callbacks: { label: ctx => ` ${ctx.raw>=0?'+':''}${ctx.raw}%` },
+        backgroundColor:'#13180f', borderColor:'#2a3520', borderWidth:1,
+        titleColor:'#e8f0e0', bodyColor:'#a8e063', titleFont:{family:'Syne'}, bodyFont:{family:'DM Mono',size:11}
+      }},
+      scales: {
+        x: { grid:{color:'rgba(42,53,32,0.4)'}, ticks:{color:'#7a9060',font:{family:'DM Mono',size:11}} },
+        y: { grid:{color:'rgba(42,53,32,0.4)'}, ticks:{color:'#7a9060',font:{family:'DM Mono',size:10},callback:v=>v+'%'} }
+      }
+    }
+  });
+}
+
+// ---- VERLOOP ----
+async function loadWealthChart() {
+  try {
+    const res = await fetch(API + '/snapshots');
+    const snaps = await res.json();
+    const ctx = document.getElementById('wealth-chart').getContext('2d');
+    if (wealthChart) wealthChart.destroy();
+    if (!snaps.length) return;
+    wealthChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: snaps.map(s => new Date(s.snapshot_date).toLocaleDateString('nl-NL',{day:'numeric',month:'short'})),
+        datasets: [{ label:'Totaal vermogen', data: snaps.map(s=>s.total_value),
+          borderColor:'#a8e063', backgroundColor:'rgba(168,224,99,0.08)',
+          borderWidth:2, fill:true, tension:0.4, pointBackgroundColor:'#a8e063', pointRadius:4, pointHoverRadius:7 }]
+      },
+      options: {
+        responsive:true, maintainAspectRatio:false,
+        plugins: { legend:{display:false}, tooltip: {
+          callbacks:{label:ctx=>' €'+ctx.raw.toLocaleString('nl-NL',{minimumFractionDigits:2,maximumFractionDigits:2})},
+          backgroundColor:'#13180f', borderColor:'#2a3520', borderWidth:1,
+          titleColor:'#e8f0e0', bodyColor:'#a8e063', titleFont:{family:'Syne'}, bodyFont:{family:'DM Mono',size:11}
+        }},
+        scales: {
+          x: { grid:{color:'rgba(42,53,32,0.4)'}, ticks:{color:'#4a5a38',font:{family:'DM Mono',size:10}} },
+          y: { grid:{color:'rgba(42,53,32,0.4)'}, ticks:{color:'#7a9060',font:{family:'DM Mono',size:10},callback:v=>'€'+v.toLocaleString('nl-NL',{maximumFractionDigits:0})} }
+        }
+      }
+    });
+  } catch(e) {}
+}
+</script>
+</body>
+</html>
