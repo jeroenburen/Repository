@@ -22,6 +22,7 @@ root/
 └── apps/
     └── energie-dashboard/ # Local energy monitoring app
     └── etf-tracker/       # Tracker for ETF portfolio
+    └── money-tracker/     # Personal Finance Tracker
 ```
 
 ---
