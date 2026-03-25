@@ -197,6 +197,27 @@ docker compose up -d --build
 ```
 
 See [`apps/etf-tracker/README.md`](apps/etf-tracker/README.md) for full documentation.
+
+### 💰 Money Tracker
+
+A local Docker-based web application for tracking personal expenses and income.
+
+**Features:**
+- Import XML CAMT.053 data
+- Add manual payments
+- Charts: Expenses and Income per category
+
+**Requirements:** [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+
+**Quick start:**
+```bash
+cd apps/money-tracker
+docker compose up -d --build
+# Open http://localhost:8282
+```
+
+See [`apps/money-tracker/README.md`](apps/money-tracker/README.md) for full documentation.
+
 ---
 
 ## Prerequisites
@@ -209,6 +230,7 @@ See [`apps/etf-tracker/README.md`](apps/etf-tracker/README.md) for full document
 
 > Always review a script before running it in your environment.
 
+Copying file to container: docker cp <file> <container>:<path>
 ---
 
 ## License

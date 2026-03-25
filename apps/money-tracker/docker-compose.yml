@@ -1,0 +1,17 @@
+version: "3.9"
+
+services:
+  money-tracker:
+    build: .
+    container_name: money-tracker
+    ports:
+      - "8282:8765"
+    volumes:
+      - money-tracker-data:/data
+    environment:
+      - DB_PATH=/data/fintrack.db
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+    restart: unless-stopped
+
+volumes:
+  money-tracker-data:
