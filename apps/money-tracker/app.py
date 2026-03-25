@@ -1021,7 +1021,7 @@ Antwoord ALLEEN met een JSON-array in dit exacte formaat, geen uitleg:
 @app.route('/api/ai-categorize', methods=['POST'])
 def ai_categorize():
     """
-    AI-categorisering van ongecategoriseerde transacties via Anthropic API.
+    AI-categorisering van ongecategoriseerde transacties via Gemini API.
 
     Body (optioneel):
       { "limit": 50, "api_key": "AIza..." }
