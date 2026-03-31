@@ -108,11 +108,11 @@
 param(
     [Parameter(Mandatory)][string]$RulesFile,
     [string]$RulesOut = ($RulesFile -replace '\.csv$', '_sanitized.csv'),
-
+    [string]$RulesIdMappingFile = ($RulesFile -replace '\.csv$', '_id_mapping.csv'),
     # Optional — policies CSV. When omitted, only rules are processed.
     [string]$PoliciesFile,
     [string]$PoliciesOut = '',   # auto-derived below if PoliciesFile is provided
-
+    [string]$PoliciesIdMappingFile = ($PoliciesFile -replace '\.csv$', '_id_mapping.csv'),
     # Accepts either a live hashtable (passed from the orchestrator)...
     [hashtable]$IdMap,
 
@@ -132,7 +132,7 @@ if ($PoliciesFile -and -not $PoliciesOut) {
 }
 
 # ---------------------------------------------------------------------------
-# 1. Resolve the ID mapping table
+# 1. Resolve the group ID mapping table
 #
 # Prefer the live hashtable if provided — it avoids a file read and ensures
 # we're working from exactly the same data the groups script produced.
@@ -266,7 +266,7 @@ if ($PoliciesFile) {
         #     and the RawJson "display_name" field.
         # -------------------------------------------------------------------
         $legacySuffix = ':: NSX Service Composer - Firewall'
-
+        
         foreach ($row in $policyRows) {
             $row.RawJson = Decode-UnicodeEscapes -text $row.RawJson
 
@@ -287,6 +287,7 @@ if ($PoliciesFile) {
             $row.Description = ''
             # Clear "description":"..." inside RawJson
             $row.RawJson = [regex]::Replace($row.RawJson, '"description":"[^"]*"', '"description":""')
+
         }
 
         # -------------------------------------------------------------------
@@ -306,6 +307,7 @@ if ($PoliciesFile) {
         # Pass 2 — assign newIds with deduplication suffixes where needed
         $displayCounter = @{}
         foreach ($row in $policyRows) {
+            $mappingLog = [System.Collections.Generic.List[PSCustomObject]]::new()
             $oldId     = $row.Id.Trim()
             $sanitized = Sanitize-Id $row.DisplayName
 
@@ -323,6 +325,8 @@ if ($PoliciesFile) {
                 if ($policyIdMap.ContainsKey($oldId)) { Write-Warning "  [Policies] Duplicate old Id '$oldId' — skipping." }
                 else                                   { $policyIdMap[$oldId] = $newId }
             }
+
+            $mappingLog.Add([PSCustomObject]@{ OldId = $oldId; NewId = $newId })
         }
 
         Write-Host "  [Policies] $($policyIdMap.Count) policy Id(s) need renaming." -ForegroundColor Yellow
@@ -372,6 +376,13 @@ if ($PoliciesFile) {
         $policyRows | Export-Csv -Path $PoliciesOut -NoTypeInformation -Encoding UTF8
         Write-Host "  [Policies] $policiesUpdated policy row(s) updated." -ForegroundColor Yellow
     }
+    Write-Host "  [Policies] Writing mapping log: $PoliciesIdMappingFile" -ForegroundColor Cyan
+    $mappingLog | Export-Csv -Path $PoliciesIdMappingFile -NoTypeInformation -Encoding UTF8
+
+    Write-Host ""
+    Write-Host "Done! $($mappingLog.Count) policies renamed." -ForegroundColor Green
+    #if ($mappingLog.Count -gt 0) { $mappingLog | Format-Table -AutoSize }
+
 }
 
 # ---------------------------------------------------------------------------
@@ -383,7 +394,7 @@ $ruleRows = Import-Csv -Path $RulesFile
 $rulesUpdated = 0
 
 foreach ($row in $ruleRows) {
-    
+    $mappingLog = [System.Collections.Generic.List[PSCustomObject]]::new()
     # Decode unicode escapes in RawJson before any processing so that all
     # subsequent pattern matches work on plain characters, not \uXXXX sequences.
     $row.RawJson = Decode-UnicodeEscapes -text $row.RawJson
@@ -405,6 +416,8 @@ foreach ($row in $ruleRows) {
         
         # This regex ensures we only replace the rule ID at the end of the path string
         $row.RawJson = [regex]::Replace($row.RawJson, "(/rules/)$escOldId(?=""|$)", "/rules/$newRuleId")
+
+        $mappingLog.Add([PSCustomObject]@{ OldId = $oldRuleId; NewId = $newRuleId })
     }
 
     $row.SourceGroups = Update-GroupColumn   -value $row.SourceGroups
@@ -451,6 +464,13 @@ foreach ($row in $ruleRows) {
 Write-Host "  [Rules] Writing: $RulesOut" -ForegroundColor Cyan
 $ruleRows | Export-Csv -Path $RulesOut -NoTypeInformation -Encoding UTF8
 Write-Host "  [Rules] $rulesUpdated rule row(s) had group/service references updated." -ForegroundColor Yellow
+
+Write-Host "  [Rules] Writing mapping log: $RulesIdMappingFile" -ForegroundColor Cyan
+$mappingLog | Export-Csv -Path $RulesIdMappingFile -NoTypeInformation -Encoding UTF8
+
+Write-Host ""
+Write-Host "Done! $($mappingLog.Count) rules renamed." -ForegroundColor Green
+#if ($mappingLog.Count -gt 0) { $mappingLog | Format-Table -AutoSize }
 
 # Print a closing summary only in standalone mode; the orchestrator prints
 # its own summary covering all steps.

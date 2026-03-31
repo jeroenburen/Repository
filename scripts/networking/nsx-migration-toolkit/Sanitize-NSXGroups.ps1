@@ -361,5 +361,5 @@ if ($PassThruMap) {
 
     Write-Host ""
     Write-Host "Done! $($mappingLog.Count) group(s) renamed." -ForegroundColor Green
-    if ($mappingLog.Count -gt 0) { $mappingLog | Format-Table -AutoSize }
+    #if ($mappingLog.Count -gt 0) { $mappingLog | Format-Table -AutoSize }
 }
