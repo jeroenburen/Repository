@@ -1,0 +1,32 @@
+type: vertical-stack
+cards:
+  - type: entity
+    entity: sensor.electricity_price_witrikstraat_4
+    name: Huidige Stroomprijs
+    icon: mdi:currency-eur
+  - type: glance
+    entities:
+      - entity: sensor.p1_meter_power
+        name: Netto Export
+      - entity: sensor.tesla_battery_level
+        name: Tesla Accu
+      - entity: number.karrotenmobiel_charging_amps
+        name: Laadsnelheid
+  - type: entities
+    title: Laden Beheer
+    entities:
+      - entity: input_boolean.tesla_fast_charge
+        name: Forceer Snel Laden (Negeer zon)
+        icon: mdi:flash
+      - entity: switch.karrotenmobiel_charger
+        name: Auto Laadstatus
+    state_color: true
+  - type: conditional
+    conditions:
+      - entity: input_boolean.tesla_fast_charge
+        state: "on"
+    card:
+      type: markdown
+      content: >-
+        ⚠️ **Let op:** De Tesla laadt nu op maximale snelheid vanaf het net. De
+        zon-automatisering is gepauzeerd.

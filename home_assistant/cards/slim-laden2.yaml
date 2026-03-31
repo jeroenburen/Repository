@@ -1,0 +1,42 @@
+type: vertical-stack
+cards:
+  # DEEL 1: Algemene info (Altijd zichtbaar)
+  - type: glance
+    entities:
+      - entity: sensor.electricity_price_witrikstraat_4
+        name: Prijs
+      - entity: sensor.p1_meter_power
+        name: Netto Export
+      - entity: sensor.tesla_battery_level
+        name: Tesla Accu
+
+  # DEEL 2: Alleen zichtbaar als de auto NIET is aangesloten
+  - type: conditional
+    conditions:
+      - entity: binary_sensor.tesla_plugged_in # Check of stekker erin zit
+        state: "plugged in"
+    card:
+      type: tile
+      entity: device_tracker.karrotenmobiel_location_tracker
+      name: Tesla is niet verbonden
+      color: grey
+      icon: mdi:car-off
+
+  # DEEL 3: Bediening (Alleen zichtbaar als de auto WEL is aangesloten)
+  - type: conditional
+    conditions:
+      - entity: binary_sensor.tesla_charger_connected
+        state: "on"
+    card:
+      type: entities
+      title: "Laden Beheer"
+      show_header_toggle: false
+      entities:
+        - entity: switch.karrotenmobiel_charger
+          name: "Nu Opladen"
+          icon: mdi:ev-station
+        - entity: number.karrotenmobiel_charging_amps
+          name: "Laadsnelheid (Ampère)"
+        - entity: input_boolean.tesla_fast_charge
+          name: "Forceer Snel Laden"
+          icon: mdi:flash

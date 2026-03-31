@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # Sanitize-NSXFirewallRules.ps1
-# Version 1.3.0
+# Version 1.3.1
 #
 # PURPOSE
 # -------
@@ -209,6 +209,29 @@ function Update-GroupColumn {
     return $updated -join '; '
 }
 
+# Rewrite /gateway-policies/<oldId> path segments in a RawJson string.
+# Handles both "path" and "parent_path" fields.
+# Mirrors Update-GroupPaths but targets /gateway-policies/ instead of /groups/.
+function Update-PolicyPaths {
+    param([string]$text)
+    if ($policyIdMap.Count -eq 0) { return $text }
+    $sortedKeys = $policyIdMap.Keys | Sort-Object { $_.Length } -Descending
+    foreach ($oldId in $sortedKeys) {
+        $escaped = [regex]::Escape($oldId)
+        $newId   = $policyIdMap[$oldId]
+        $text = [regex]::Replace($text, "(?<=/securit-policies/)$escaped(?=/|""|$)", $newId)
+    }
+    return $text
+}
+
+# Update PolicyId and PolicyName CSV columns for a rule row.
+# Mirrors Update-GroupColumn for policy references.
+function Update-PolicyColumns {
+    param([string]$policyId)
+    if ($policyIdMap.Count -eq 0 -or -not $policyIdMap.ContainsKey($policyId)) { return $policyId }
+    return $policyIdMap[$policyId]
+}
+
 # Remove all tags from a RawJson string.
 # Tags in NSX RawJson appear as a top-level array, e.g.:
 #   "tags":[{"scope":"v_origin","tag":"SecurityGroup-securitygroup-70"}]
@@ -251,45 +274,7 @@ function Sanitize-Id {
 }
 
 # ---------------------------------------------------------------------------
-# 3. Process rules CSV
-# ---------------------------------------------------------------------------
-Write-Host "  [Rules] Reading: $RulesFile" -ForegroundColor Cyan
-$ruleRows = Import-Csv -Path $RulesFile
-
-$rulesUpdated = 0
-
-foreach ($row in $ruleRows) {
-    # Decode unicode escapes in RawJson before any processing so that all
-    # subsequent pattern matches work on plain characters, not \uXXXX sequences.
-    $row.RawJson = Decode-UnicodeEscapes -text $row.RawJson
-
-    $before = $row | ConvertTo-Json -Compress
-
-    $row.SourceGroups = Update-GroupColumn   -value $row.SourceGroups
-    $row.DestGroups   = Update-GroupColumn   -value $row.DestGroups
-    $row.AppliedTo    = Update-GroupColumn   -value $row.AppliedTo
-    $row.Services     = Update-ServiceColumn -value $row.Services
-
-    # RawJson contains the same group paths inside source_groups[],
-    # destination_groups[], and scope[] — Update-GroupPaths handles all of them.
-    # Update-ServicePaths rewrites /services/<oldId> segments in services[].
-    $row.RawJson = Update-GroupPaths   -text $row.RawJson
-    $row.RawJson = Update-ServicePaths -text $row.RawJson
-
-    # Remove tags from RawJson and clear the Tags CSV column.
-    $row.RawJson = Remove-Tags -json $row.RawJson
-    $row.Tags    = ''
-
-    $after = $row | ConvertTo-Json -Compress
-    if ($before -ne $after) { $rulesUpdated++ }
-}
-
-Write-Host "  [Rules] Writing: $RulesOut" -ForegroundColor Cyan
-$ruleRows | Export-Csv -Path $RulesOut -NoTypeInformation -Encoding UTF8
-Write-Host "  [Rules] $rulesUpdated rule row(s) had group/service references updated." -ForegroundColor Yellow
-
-# ---------------------------------------------------------------------------
-# 4. Process policies CSV (optional)
+# 3. Process policies CSV (optional)
 # ---------------------------------------------------------------------------
 if ($PoliciesFile) {
     if (-not (Test-Path $PoliciesFile)) {
@@ -299,36 +284,40 @@ if ($PoliciesFile) {
         $policyRows = Import-Csv -Path $PoliciesFile
 
         # -------------------------------------------------------------------
-        # 4a. Strip the legacy suffix from DisplayName before building the
+        # 3a. Strip the legacy suffix from DisplayName before building the
         #     policy Id map. The suffix is removed from both the CSV column
         #     and the RawJson "display_name" field.
         # -------------------------------------------------------------------
-        $legacySuffix = '::  NSX Service Composer - Firewall'
+        $legacySuffix = ':: NSX Service Composer - Firewall'
 
         foreach ($row in $policyRows) {
             $row.RawJson = Decode-UnicodeEscapes -text $row.RawJson
 
             if ($row.DisplayName -like "*$legacySuffix*") {
+                $originalDisplay = $row.DisplayName          # keep original for RawJson substitution
                 $cleanedDisplay = $row.DisplayName.Replace($legacySuffix, '').Trim()
 
                 # Update the CSV DisplayName column
                 $row.DisplayName = $cleanedDisplay
 
                 # Update "display_name" inside RawJson
-                $escOld      = [regex]::Escape($row.DisplayName)   # already updated above — use escaped original
-                # Re-escape the original (pre-replacement) value for the regex
-                $escOldSuffix = [regex]::Escape($cleanedDisplay + $legacySuffix)
+                $escOld       = [regex]::Escape($originalDisplay)
                 $escCleaned   = [regex]::Escape($cleanedDisplay)
                 $row.RawJson  = [regex]::Replace(
                     $row.RawJson,
-                    """display_name"":""$escOldSuffix""",
+                    """display_name"":""$escOld""",
                     """display_name"":""$escCleaned"""
                 )
             }
+
+            # Clear the Description CSV column
+            $row.Description = ''
+            # Clear "description":"..." inside RawJson
+            $row.RawJson = [regex]::Replace($row.RawJson, '"description":"[^"]*"', '"description":""')
         }
 
         # -------------------------------------------------------------------
-        # 4b. Build policy Id map: OldId -> sanitized(DisplayName)
+        # 3b. Build policy Id map: OldId -> sanitized(DisplayName)
         #     Mirrors the two-pass deduplication logic in Sanitize-NSXGroups.ps1.
         # -------------------------------------------------------------------
         $policyIdMap = @{}
@@ -366,7 +355,7 @@ if ($PoliciesFile) {
         Write-Host "  [Policies] $($policyIdMap.Count) policy Id(s) need renaming." -ForegroundColor Yellow
 
         # -------------------------------------------------------------------
-        # 4c. Apply Id renames and group-path updates to each policy row
+        # 3c. Apply Id renames and group-path updates to each policy row
         # -------------------------------------------------------------------
         $policiesUpdated = 0
 
@@ -384,13 +373,14 @@ if ($PoliciesFile) {
                 $row.DisplayName = $newId
 
                 # Rewrite "id", "relative_path", and "display_name" in RawJson
-                $esc            = [regex]::Escape($oldId)
-                $escOldDisplay  = [regex]::Escape($oldDisplay)
-                $json           = $row.RawJson
-                $json           = $json -replace """id"":""$esc""",                   """id"":""$newId"""
-                $json           = $json -replace """relative_path"":""$esc""",        """relative_path"":""$newId"""
-                $json           = $json -replace """display_name"":""$escOldDisplay""", """display_name"":""$newId"""
-                $row.RawJson    = $json
+                $esc           = [regex]::Escape($oldId)
+                $escOldDisplay = [regex]::Escape($oldDisplay)
+                $json          = $row.RawJson
+                $json          = $json -replace """id"":""$esc""",                   """id"":""$newId"""
+                $json          = $json -replace """relative_path"":""$esc""",        """relative_path"":""$newId"""
+                $json          = $json -replace """display_name"":""$escOldDisplay""", """display_name"":""$newId"""
+                $json          = $json -replace """path"":""/infra/domains/default/security-policies/$esc""", """path"":""/infra/domains/default/security-policies/$newId"""
+                $row.RawJson   = $json
             }
 
             # Update group paths in the Scope column and RawJson scope[] array
@@ -410,6 +400,67 @@ if ($PoliciesFile) {
         Write-Host "  [Policies] $policiesUpdated policy row(s) updated." -ForegroundColor Yellow
     }
 }
+
+# ---------------------------------------------------------------------------
+# 4. Process rules CSV
+# ---------------------------------------------------------------------------
+Write-Host "  [Rules] Reading: $RulesFile" -ForegroundColor Cyan
+$ruleRows = Import-Csv -Path $RulesFile
+
+$rulesUpdated = 0
+
+foreach ($row in $ruleRows) {
+    
+    # Decode unicode escapes in RawJson before any processing so that all
+    # subsequent pattern matches work on plain characters, not \uXXXX sequences.
+    $row.RawJson = Decode-UnicodeEscapes -text $row.RawJson
+
+    $before = $row | ConvertTo-Json -Compress
+
+    $row.SourceGroups = Update-GroupColumn   -value $row.SourceGroups
+    $row.DestGroups   = Update-GroupColumn   -value $row.DestGroups
+    $row.AppliedTo    = Update-GroupColumn   -value $row.AppliedTo
+    $row.Services     = Update-ServiceColumn -value $row.Services
+    
+    # Rewrite PolicyId and PolicyName CSV columns
+    if ($policyIdMap.ContainsKey($row.PolicyId)) {
+        $row.PolicyId   = $policyIdMap[$row.PolicyId]
+        $row.PolicyName = $row.PolicyId   # PolicyName mirrors the new Id
+    }
+    # RawJson contains the same group paths inside source_groups[],
+    # destination_groups[], and scope[] — Update-GroupPaths handles all of them.
+    # Update-ServicePaths rewrites /services/<oldId> segments in services[].
+    $row.RawJson = Update-GroupPaths   -text $row.RawJson
+    $row.RawJson = Update-ServicePaths -text $row.RawJson
+
+    # Rewrite path and parent_path in RawJson
+    foreach ($oldPolicyId in $policyIdMap.Keys) {
+        $escPolicy   = [regex]::Escape($oldPolicyId)
+        $newPolicyId = $policyIdMap[$oldPolicyId]
+
+        $row.RawJson = [regex]::Replace(
+            $row.RawJson,
+            "(?<=""path"":"")([^""]*/security-policies/)$escPolicy(?=/|"")",
+            "`${1}$newPolicyId"
+        )
+        $row.RawJson = [regex]::Replace(
+            $row.RawJson,
+            "(?<=""parent_path"":"")([^""]*/security-policies/)$escPolicy(?=/|"")",
+            "`${1}$newPolicyId"
+        )
+    }
+
+    # Remove tags from RawJson and clear the Tags CSV column.
+    $row.RawJson = Remove-Tags -json $row.RawJson
+    $row.Tags    = ''
+
+    $after = $row | ConvertTo-Json -Compress
+    if ($before -ne $after) { $rulesUpdated++ }
+}
+
+Write-Host "  [Rules] Writing: $RulesOut" -ForegroundColor Cyan
+$ruleRows | Export-Csv -Path $RulesOut -NoTypeInformation -Encoding UTF8
+Write-Host "  [Rules] $rulesUpdated rule row(s) had group/service references updated." -ForegroundColor Yellow
 
 # Print a closing summary only in standalone mode; the orchestrator prints
 # its own summary covering all steps.

@@ -1,0 +1,54 @@
+alias: "Tesla Slim Laden: Zon & Tibber"
+description: Laadt op basis van P1 export of lage Tibber prijzen. Beschermt thuisaccu.
+triggers:
+  - entity_id: sensor.p1_meter_power
+    trigger: state
+conditions:
+  - condition: state
+    entity_id: device_tracker.karrotenmobiel_location_tracker
+    state: home
+  - condition: state
+    entity_id: binary_sensor.karrotenmobiel_charger
+    state: "on"
+  - condition: state
+    entity_id: input_boolean.tesla_fast_charge
+    state: "off"
+actions:
+  - choose:
+      - conditions:
+          - condition: numeric_state
+            entity_id: sensor.electricity_price_witrikstraat_4
+            below: 0.05
+        sequence:
+          - target:
+              entity_id: number.karrotenmobiel_charging_amps
+            data:
+              value: 16
+            action: number.set_value
+          - target:
+              entity_id: switch.karrotenmobiel_charger
+            action: switch.turn_on
+      - conditions:
+          - condition: numeric_state
+            entity_id: sensor.p1_meter_power
+            below: -1400
+        sequence:
+          - target:
+              entity_id: switch.karrotenmobiel_charger
+            action: switch.turn_on
+          - target:
+              entity_id: number.karrotenmobiel_charging_amps
+            data:
+              value: >
+                {% set amps = (states('sensor.p1_meter_active_power') | float |
+                abs / 690) | int %} {{ [ [amps, 5]|max , 16]|min }} 
+            action: number.set_value
+      - conditions:
+          - condition: numeric_state
+            entity_id: sensor.p1_meter_power
+            above: -100
+        sequence:
+          - target:
+              entity_id: switch.karrotenmobiel_charger
+            action: switch.turn_off
+mode: restart
