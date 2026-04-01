@@ -1,6 +1,6 @@
-﻿# =============================================================================
+# =============================================================================
 # Sanitize-NSXFirewallRules.ps1
-# Version 1.3.2
+# Version 1.3.3
 #
 # PURPOSE
 # -------
@@ -18,6 +18,12 @@
 #
 # WHAT GETS CHANGED — RULES (NSX_Rules.csv)
 # ------------------------------------------
+# Rule Ids are renamed to match their DisplayNames, following the same
+# Sanitize-Id logic used by policies and Sanitize-NSXGroups.ps1 (spaces and
+# invalid characters replaced with hyphens). Both the Id and DisplayName CSV
+# columns are updated, as are the "id", "relative_path", "display_name", and
+# the rule segment of "path" inside RawJson.
+#
 # For each rule row, group Id references are updated in:
 #
 #   CSV columns (contain full NSX group paths, or "ANY"):
@@ -76,7 +82,7 @@
 #
 # WHAT DOES NOT GET CHANGED
 # -------------------------
-# Rule Ids and all fields not explicitly listed above are left as-is.
+# All fields not explicitly listed above are left as-is.
 #
 # USAGE
 # -----
@@ -402,18 +408,22 @@ foreach ($row in $ruleRows) {
     $before = $row | ConvertTo-Json -Compress
 
     # --- NEW ID SANITIZATION LOGIC ---
-    $oldRuleId = $row.Id.Trim()
-    $newRuleId = $row.DisplayName.Trim()
+    $oldRuleId   = $row.Id.Trim()
+    $oldDisplay  = $row.DisplayName.Trim()
+    $newRuleId   = Sanitize-Id $oldDisplay
 
     if ($oldRuleId -ne $newRuleId) {
-        # Update CSV column
-        $row.Id = $newRuleId
+        # Update CSV columns
+        $row.Id          = $newRuleId
+        $row.DisplayName = $newRuleId
 
-        # Update "id", "relative_path", and the rule segment of "path" in RawJson
-        $escOldId = [regex]::Escape($oldRuleId)
-        $row.RawJson = $row.RawJson -replace """id"":""$escOldId""",            """id"":""$newRuleId"""
-        $row.RawJson = $row.RawJson -replace """relative_path"":""$escOldId""", """relative_path"":""$newRuleId"""
-        
+        # Update "id", "relative_path", "display_name", and the rule segment of "path" in RawJson
+        $escOldId      = [regex]::Escape($oldRuleId)
+        $escOldDisplay = [regex]::Escape($oldDisplay)
+        $row.RawJson = $row.RawJson -replace """id"":""$escOldId""",                    """id"":""$newRuleId"""
+        $row.RawJson = $row.RawJson -replace """relative_path"":""$escOldId""",         """relative_path"":""$newRuleId"""
+        $row.RawJson = $row.RawJson -replace """display_name"":""$escOldDisplay""",     """display_name"":""$newRuleId"""
+
         # This regex ensures we only replace the rule ID at the end of the path string
         $row.RawJson = [regex]::Replace($row.RawJson, "(/rules/)$escOldId(?=""|$)", "/rules/$newRuleId")
 
