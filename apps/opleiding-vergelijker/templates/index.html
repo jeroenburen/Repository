@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Studie Vergelijker</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            margin: 40px;
+            background: #f4f4f4;
+        }
+
+        .card {
+            background: white;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th,
+        td {
+            border: 1px solid #ddd;
+            padding: 12px;
+            text-align: left;
+        }
+
+        th {
+            background-color: #007bff;
+            color: white;
+        }
+
+        .score-badge {
+            font-weight: bold;
+            color: #007bff;
+            font-size: 1.2em;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>🎓 Studie Vergelijker</h1>
+
+    <div class="card">
+        <h3>1. Kenmerken Beheren</h3>
+
+        {% if kenmerken %}
+        <table>
+            <tr>
+                <th>Kenmerk</th>
+                <th>Weging (1-5)</th>
+                <th>Acties</th>
+            </tr>
+            {% for k in kenmerken %}
+            <tr>
+                <td>{{ k.naam }}</td>
+                <td>
+                    <form action="/update_kenmerk/{{ k.id }}" method="post" style="display:inline;">
+                        <input type="number" name="weging" value="{{ k.weging }}" min="1" max="5" style="width: 50px;">
+                        <button type="submit" style="font-size: 0.8em;">Update</button>
+                    </form>
+                </td>
+                <td>
+                    <a href="/delete_kenmerk/{{ k.id }}"
+                        onclick="return confirm('Let op: hiermee verwijder je dit kenmerk ook bij alle opleidingen!')"
+                        style="color: red; font-size: 0.8em; text-decoration: none;">🗑️ Wis</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+        <br>
+        {% endif %}
+
+        <hr>
+        <h4>Nieuw Kenmerk Toevoegen</h4>
+        <form action="/add_kenmerk" method="post">
+            <input type="text" name="naam" placeholder="Naam (bijv. Sfeer)" required>
+            <input type="number" name="weging" min="1" max="5" placeholder="Weging" required>
+            <button type="submit">Voeg toe</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h3>2. Opleiding Toevoegen</h3>
+        <form action="/add_opleiding" method="post">
+            <input type="text" name="naam" placeholder="Naam Opleiding" required><br><br>
+            {% for k in kenmerken %}
+            <label>{{ k.naam }} (Weging: {{ k.weging }}):</label>
+            <select name="kenmerk_{{ k.id }}">
+                <option value="++">++</option>
+                <option value="+">+</option>
+                <option value="+-">+-</option>
+                <option value="-">-</option>
+                <option value="--">--</option>
+            </select><br>
+            {% endfor %}
+            <br><button type="submit">Bereken & Voeg Opleiding Toe</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h3>📊 Resultaten (Gesorteerd op Totaalscore)</h3>
+        <table>
+            <tr>
+                <th>Positie</th>
+                <th>Opleiding</th>
+                <th>Details (Symbool x Weging)</th>
+                <th>Totaalscore</th>
+                <th>Acties</th>
+            </tr>
+            {% for res in resultaten %}
+            <tr>
+                <td>{{ loop.index }}</td>
+                <td><strong>{{ res.naam }}</strong></td>
+                <td>
+                    {% for d in res.details %}
+                    <small>{{ d.naam }}: {{ d.symbool }} ({{ d.sub }})</small><br>
+                    {% endfor %}
+                </td>
+                <td class="score-badge">{{ res.totaal }}</td>
+                <td>
+                    <a href="/delete_opleiding/{{ res.id }}"
+                        onclick="return confirm('Weet je zeker dat je deze opleiding wilt verwijderen?')"
+                        style="color: red; text-decoration: none;">🗑️ Verwijderen</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
+</body>
+
+</html>

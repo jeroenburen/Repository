@@ -1,0 +1,7 @@
+services:
+  studie-app:
+    build: .
+    ports:
+      - "5100:5100"
+    volumes:
+      - ./data:/app/data
