@@ -1,6 +1,6 @@
 # =============================================================================
 # Sanitize-NSXFirewallRules.ps1
-# Version 1.3.3
+# Version 1.3.4
 #
 # PURPOSE
 # -------
@@ -49,9 +49,11 @@
 # WHAT GETS CHANGED — POLICIES (NSX_Policies.csv)
 # -------------------------------------------------
 # Policy DisplayNames may contain the legacy suffix
-# "::  NSX Service Composer - Firewall". This is stripped from DisplayName
-# before any Id renaming takes place, both in the CSV column and in the
-# RawJson "display_name" field.
+# ":: NSX Service Composer - Firewall". This is stripped from the CSV
+# DisplayName column only (step 3a). The RawJson "display_name" field is
+# left untouched at this stage and is overwritten correctly in step 3c,
+# where it is matched by the old Id rather than the old display name —
+# making the substitution immune to suffix variations or encoding issues.
 #
 # Policy Ids are then renamed to match their (cleaned) DisplayNames, following
 # the same Sanitize-Id logic used by Sanitize-NSXGroups.ps1. Duplicate
@@ -267,39 +269,34 @@ if ($PoliciesFile) {
         $policyRows = Import-Csv -Path $PoliciesFile
 
         # -------------------------------------------------------------------
-        # 3a. Strip the legacy suffix from DisplayName before building the
-        #     policy Id map. The suffix is removed from both the CSV column
-        #     and the RawJson "display_name" field.
+        # 3a. Strip the legacy suffix from the DisplayName CSV column only.
+        #     RawJson is intentionally not touched here — the "display_name"
+        #     field will be overwritten correctly in step 3c when the full
+        #     Id rename is applied (matched by old Id, not old display name).
         # -------------------------------------------------------------------
         $legacySuffix = ':: NSX Service Composer - Firewall'
-        
+
+        foreach ($row in $policyRows) {
+            if ($row.DisplayName -like "*$legacySuffix*") {
+                $row.DisplayName = $row.DisplayName.Replace($legacySuffix, '').Trim()
+            }
+        }
+
+        # -------------------------------------------------------------------
+        # 3b. Decode unicode escapes in RawJson, then build the policy Id map:
+        #     OldId -> sanitized(DisplayName).
+        #     DisplayName is already suffix-free from step 3a.
+        #     Mirrors the two-pass deduplication logic in Sanitize-NSXGroups.ps1.
+        # -------------------------------------------------------------------
         foreach ($row in $policyRows) {
             $row.RawJson = Decode-UnicodeEscapes -text $row.RawJson
-
-            if ($row.DisplayName -like "*$legacySuffix*") {
-                $originalDisplay = $row.DisplayName          # keep original for RawJson substitution
-                $cleanedDisplay = $row.DisplayName.Replace($legacySuffix, '').Trim()
-
-                # Update the CSV DisplayName column
-                $row.DisplayName = $cleanedDisplay
-
-                # Update "display_name" inside RawJson
-                $escOld       = [regex]::Escape($originalDisplay)
-                $escCleaned   = [regex]::Escape($cleanedDisplay)
-                $row.RawJson  = [regex]::Replace($row.RawJson,"""display_name"":""$escOld""","""display_name"":""$escCleaned""")
-            }
 
             # Clear the Description CSV column
             $row.Description = ''
             # Clear "description":"..." inside RawJson
             $row.RawJson = [regex]::Replace($row.RawJson, '"description":"[^"]*"', '"description":""')
-
         }
 
-        # -------------------------------------------------------------------
-        # 3b. Build policy Id map: OldId -> sanitized(DisplayName)
-        #     Mirrors the two-pass deduplication logic in Sanitize-NSXGroups.ps1.
-        # -------------------------------------------------------------------
         $policyIdMap = @{}
 
         # Pass 1 — count occurrences of each sanitized DisplayName
@@ -328,12 +325,11 @@ if ($PoliciesFile) {
             }
 
             if ($oldId -ne $newId) {
-                if ($policyIdMap.ContainsKey($oldId))
-                    { Write-Warning "  [Policies] Duplicate old Id '$oldId' — skipping." }
-                else { $policyIdMap[$oldId] = $newId }
-                $mappingLog.Add([PSCustomObject]@{ OldId = $oldId; NewId = $newId })
+                if ($policyIdMap.ContainsKey($oldId)) { Write-Warning "  [Policies] Duplicate old Id '$oldId' — skipping." }
+                else                                   { $policyIdMap[$oldId] = $newId }
             }
 
+            $mappingLog.Add([PSCustomObject]@{ OldId = $oldId; NewId = $newId })
         }
 
         Write-Host "  [Policies] $($policyIdMap.Count) policy Id(s) need renaming." -ForegroundColor Yellow
@@ -349,22 +345,24 @@ if ($PoliciesFile) {
             $before = $row | ConvertTo-Json -Compress
 
             if ($policyIdMap.ContainsKey($oldId)) {
-                $newId      = $policyIdMap[$oldId]
-                $oldDisplay = $row.DisplayName.Trim()
+                $newId = $policyIdMap[$oldId]
 
                 # Update CSV columns
                 $row.Id          = $newId
                 $row.DisplayName = $newId
 
-                # Rewrite "id", "relative_path", and "display_name" in RawJson
-                $esc           = [regex]::Escape($oldId)
-                $escOldDisplay = [regex]::Escape($oldDisplay)
-                $json          = $row.RawJson
-                $json          = $json -replace """id"":""$esc""",                   """id"":""$newId"""
-                $json          = $json -replace """relative_path"":""$esc""",        """relative_path"":""$newId"""
-                $json          = $json -replace """display_name"":""$escOldDisplay""", """display_name"":""$newId"""
-                $json          = $json -replace """path"":""/infra/domains/default/security-policies/$esc""", """path"":""/infra/domains/default/security-policies/$newId"""
-                $row.RawJson   = $json
+                # Rewrite "id", "relative_path", "path", and "display_name" in RawJson.
+                # "display_name" is matched by a wildcard pattern anchored to the old Id
+                # on the same JSON object — the RawJson field may still contain the legacy
+                # suffix at this point (it was never touched in 3a), so matching by display
+                # name would be unreliable. Using a lookahead on the old Id is the safe anchor.
+                $esc         = [regex]::Escape($oldId)
+                $json        = $row.RawJson
+                $json        = $json -replace """id"":""$esc""",                                             """id"":""$newId"""
+                $json        = $json -replace """relative_path"":""$esc""",                                  """relative_path"":""$newId"""
+                $json        = [regex]::Replace($json, """display_name"":""[^""]*""(?=[^}]*""id"":""$esc"")", """display_name"":""$newId""")
+                $json        = $json -replace """path"":""/infra/domains/default/security-policies/$esc""",   """path"":""/infra/domains/default/security-policies/$newId"""
+                $row.RawJson = $json
             }
 
             # Update group paths in the Scope column and RawJson scope[] array
