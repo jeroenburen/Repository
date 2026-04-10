@@ -70,16 +70,16 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$NSXManager,
-    [string]$OutputFolder  = ".\NSX_DFW_Export_$(Get-Date -Format 'yyyyMMdd_HHmmss')",
-    [string]$DomainId      = 'default',
-    [bool]$ExportIPSets    = $false,
-    [bool]$ExportServices  = $false,
-    [bool]$ExportGroups    = $false,
-    [bool]$ExportProfiles  = $false,
-    [bool]$ExportPolicies  = $false,
-    [bool]$ExportTags      = $false,
-    [string]$LogFile   = (Join-Path $OutputFolder "Export-NSX-DFW_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"),
-    [ValidateSet('Screen','File','Both')]
+    [string]$OutputFolder = ".\NSX_DFW_Export_$(Get-Date -Format 'yyyyMMdd_HHmmss')",
+    [string]$DomainId = 'default',
+    [bool]$ExportIPSets = $false,
+    [bool]$ExportServices = $false,
+    [bool]$ExportGroups = $false,
+    [bool]$ExportProfiles = $false,
+    [bool]$ExportPolicies = $false,
+    [bool]$ExportTags = $false,
+    [string]$LogFile = (Join-Path $OutputFolder "Export-NSX-DFW_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"),
+    [ValidateSet('Screen', 'File', 'Both')]
     [string]$LogTarget = 'Screen'
 )
 
@@ -117,15 +117,15 @@ function Write-Log {
     #>
     param(
         [string]$Message,
-        [ValidateSet('INFO','WARN','ERROR','SUCCESS')][string]$Level = 'INFO'
+        [ValidateSet('INFO', 'WARN', 'ERROR', 'SUCCESS')][string]$Level = 'INFO'
     )
-    $ts    = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    $line  = "[$ts][$Level] $Message"
+    $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $line = "[$ts][$Level] $Message"
     $color = switch ($Level) {
-        'WARN'    { 'Yellow' }
-        'ERROR'   { 'Red'    }
-        'SUCCESS' { 'Green'  }
-        default   { 'Cyan'   }
+        'WARN' { 'Yellow' }
+        'ERROR' { 'Red' }
+        'SUCCESS' { 'Green' }
+        default { 'Cyan' }
     }
 
     if ($LogTarget -eq 'Screen' -or $LogTarget -eq 'Both') {
@@ -135,7 +135,8 @@ function Write-Log {
     if (($LogTarget -eq 'File' -or $LogTarget -eq 'Both') -and $LogFile) {
         try {
             Add-Content -Path $LogFile -Value $line -Encoding UTF8
-        } catch {
+        }
+        catch {
             # Fall back to screen if file write fails
             Write-Host "[WARN] Could not write to log file: $_" -ForegroundColor Yellow
             Write-Host $line -ForegroundColor $color
@@ -157,15 +158,15 @@ public class TrustAllCerts : ICertificatePolicy {
 "@
 }
 [System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCerts
-[System.Net.ServicePointManager]::SecurityProtocol  = [System.Net.SecurityProtocolType]::Tls12
+[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
 
 # ─────────────────────────────────────────────────────────────
 # CREDENTIALS
 # ─────────────────────────────────────────────────────────────
 Write-Log "Enter credentials for NSX Manager: $NSXManager"
-$Cred    = Get-Credential -Message "NSX 4 ($NSXManager) credentials"
-$pair    = "$($Cred.UserName):$($Cred.GetNetworkCredential().Password)"
-$bytes   = [System.Text.Encoding]::ASCII.GetBytes($pair)
+$Cred = Get-Credential -Message "NSX 4 ($NSXManager) credentials"
+$pair = "$($Cred.UserName):$($Cred.GetNetworkCredential().Password)"
+$bytes = [System.Text.Encoding]::ASCII.GetBytes($pair)
 $Headers = @{
     Authorization  = "Basic $([Convert]::ToBase64String($bytes))"
     'Content-Type' = 'application/json'
@@ -179,7 +180,8 @@ function Invoke-NSXGet {
     $uri = "https://$NSXManager$Path"
     try {
         return Invoke-RestMethod -Uri $uri -Method GET -Headers $Headers
-    } catch {
+    }
+    catch {
         Write-Log "GET $uri failed: $_" ERROR
         return $null
     }
@@ -188,9 +190,9 @@ function Invoke-NSXGet {
 function Get-AllPages {
     param([string]$Path)
     $allResults = @()
-    $cursor     = $null
+    $cursor = $null
     do {
-        $url  = if ($cursor) { "${Path}?cursor=$cursor" } else { $Path }
+        $url = if ($cursor) { "${Path}?cursor=$cursor" } else { $Path }
         $resp = Invoke-NSXGet -Path $url
         if ($null -eq $resp) { break }
         if ($resp.PSObject.Properties['results'] -and $resp.results) { $allResults += $resp.results }
@@ -205,8 +207,8 @@ function Get-AllPages {
 function Remove-ReadOnlyFields {
     param([object]$Obj)
     $clone = $Obj | ConvertTo-Json -Depth 20 | ConvertFrom-Json
-    foreach ($field in @('_create_time','_last_modified_time','_system_owned','_revision',
-                         '_create_user','_last_modified_user','_protection')) {
+    foreach ($field in @('_create_time', '_last_modified_time', '_system_owned', '_revision',
+            '_create_user', '_last_modified_user', '_protection')) {
         if ($clone.PSObject.Properties[$field]) {
             $clone.PSObject.Properties.Remove($field)
         }
@@ -250,7 +252,7 @@ $OutputFolder = (Resolve-Path $OutputFolder).Path
 # ─────────────────────────────────────────────────────────────
 # STATISTICS
 # ─────────────────────────────────────────────────────────────
-$Stats = @{ IPSets=0; Services=0; ServiceGroups=0; Groups=0; Profiles=0; Policies=0; Rules=0; Tags=0 }
+$Stats = @{ IPSets = 0; Services = 0; ServiceGroups = 0; Groups = 0; Profiles = 0; Policies = 0; Rules = 0; Tags = 0 }
 
 # ═════════════════════════════════════════════════════════════
 # 1. EXPORT IP SETS
@@ -285,24 +287,24 @@ function Export-IPSets {
 function Export-Services {
     Write-Log "━━━ Exporting Services ━━━" INFO
     $objects = Get-AllPages -Path "/policy/api/v1/infra/services"
-    $custom  = $objects | Where-Object { (Get-SafeProp $_ '_system_owned') -ne $true }
+    $custom = $objects | Where-Object { (Get-SafeProp $_ '_system_owned') -ne $true }
 
     if (-not $custom) { Write-Log "No custom Services found." WARN }
     else {
         $rows = foreach ($svc in $custom) {
-            $clean   = Remove-ReadOnlyFields $svc
+            $clean = Remove-ReadOnlyFields $svc
             $entries = Get-SafeProp $svc 'service_entries'
             $entrySummary = ''
             if ($entries) {
                 $entrySummary = ($entries | ForEach-Object {
-                    $type = $_.resource_type
-                    switch -Wildcard ($type) {
-                        '*L4Port*'     { "$(Get-SafeProp $_ 'l4_protocol'):$(((Get-SafeProp $_ 'destination_ports') -join ','))" }
-                        '*ICMPType*'   { "ICMP:$(Get-SafeProp $_ 'icmp_type')" }
-                        '*IPProtocol*' { "IPProto:$(Get-SafeProp $_ 'protocol_number')" }
-                        default        { $type }
-                    }
-                }) -join '; '
+                        $type = $_.resource_type
+                        switch -Wildcard ($type) {
+                            '*L4Port*' { "$(Get-SafeProp $_ 'l4_protocol'):$(((Get-SafeProp $_ 'destination_ports') -join ','))" }
+                            '*ICMPType*' { "ICMP:$(Get-SafeProp $_ 'icmp_type')" }
+                            '*IPProtocol*' { "IPProto:$(Get-SafeProp $_ 'protocol_number')" }
+                            default { $type }
+                        }
+                    }) -join '; '
             }
             [PSCustomObject]@{
                 ObjectType     = 'Service'
@@ -332,7 +334,7 @@ function Export-Services {
     if (-not $customSGs) { Write-Log "No custom Service Groups found." WARN; return }
 
     $rows = foreach ($sg in $customSGs) {
-        $clean   = Remove-ReadOnlyFields $sg
+        $clean = Remove-ReadOnlyFields $sg
         $members = Get-SafeProp $sg 'members'
         [PSCustomObject]@{
             ObjectType  = 'ServiceGroup'
@@ -357,19 +359,20 @@ function Export-Groups {
     Write-Log "━━━ Exporting Security Groups ━━━" INFO
     $objects = Get-AllPages -Path "/policy/api/v1/infra/domains/$DomainId/groups"
     $custom = $objects | Where-Object {
-      (Get-SafeProp $_ '_system_owned') -ne $true -and
-      (Get-SafeProp $_ '_create_user')  -ne 'system' -and
-      $_.id -notin $pseudoSystemGroupIds
+        (Get-SafeProp $_ '_system_owned') -ne $true -and
+        (Get-SafeProp $_ '_create_user') -ne 'system' -and
+        $_.id -notin $pseudoSystemGroupIds
     }
 
     if (-not $custom) { Write-Log "No custom Security Groups found." WARN; return }
 
     $rows = foreach ($grp in $custom) {
-        $clean      = Remove-ReadOnlyFields $grp
+        $clean = Remove-ReadOnlyFields $grp
         $expression = Get-SafeProp $grp 'expression'
         $exprSummary = if ($expression) {
             ($expression | ForEach-Object { $_.resource_type }) -join '; '
-        } else { 'Static' }
+        }
+        else { 'Static' }
 
         [PSCustomObject]@{
             ObjectType      = 'Group'
@@ -394,30 +397,31 @@ function Export-Groups {
 function Export-Profiles {
     Write-Log "━━━ Exporting Context Profiles ━━━" INFO
     $objects = Get-AllPages -Path "/policy/api/v1/infra/context-profiles"
-    $custom  = $objects | Where-Object { (Get-SafeProp $_ '_system_owned') -ne $true }
+    $custom = $objects | Where-Object { (Get-SafeProp $_ '_system_owned') -ne $true }
 
     if (-not $custom) { Write-Log "No custom Context Profiles found." WARN; return }
 
     $rows = foreach ($prof in $custom) {
-        $clean      = Remove-ReadOnlyFields $prof
+        $clean = Remove-ReadOnlyFields $prof
         $attributes = Get-SafeProp $prof 'attributes'
         $attrSummary = if ($attributes) {
             ($attributes | ForEach-Object {
-                $key   = Get-SafeProp $_ 'key'
-                $vals  = Get-SafeProp $_ 'value'
-                $vStr  = if ($vals) { $vals -join ',' } else { '' }
+                $key = Get-SafeProp $_ 'key'
+                $vals = Get-SafeProp $_ 'value'
+                $vStr = if ($vals) { $vals -join ',' } else { '' }
                 "$key=$vStr"
             }) -join '; '
-        } else { '' }
+        }
+        else { '' }
 
         [PSCustomObject]@{
-            ObjectType   = 'ContextProfile'
-            Id           = $prof.id
-            DisplayName  = $prof.display_name
-            Description  = (Get-SafeProp $prof 'description')
-            Attributes   = $attrSummary
-            Tags         = (Format-Tags $prof)
-            RawJson      = ($clean | ConvertTo-Json -Depth 20 -Compress)
+            ObjectType  = 'ContextProfile'
+            Id          = $prof.id
+            DisplayName = $prof.display_name
+            Description = (Get-SafeProp $prof 'description')
+            Attributes  = $attrSummary
+            Tags        = (Format-Tags $prof)
+            RawJson     = ($clean | ConvertTo-Json -Depth 20 -Compress)
         }
     }
 
@@ -433,19 +437,19 @@ function Export-Profiles {
 function Export-Policies {
     Write-Log "━━━ Exporting DFW Policies ━━━" INFO
     $policies = Get-AllPages -Path "/policy/api/v1/infra/domains/$DomainId/security-policies"
-    $custom   = $policies | Where-Object { 
-      (Get-SafeProp $_ '_system_owned') -ne $true -and 
-      $_.Id -notin $pseudoSystemPolicyIds 
+    $custom = $policies | Where-Object { 
+        (Get-SafeProp $_ '_system_owned') -ne $true -and 
+        $_.Id -notin $pseudoSystemPolicyIds 
     } | Sort-Object -Property sequence_number
 
     if (-not $custom) { Write-Log "No custom DFW Policies found." WARN; return }
 
     $policyRows = @()
-    $ruleRows   = @()
+    $ruleRows = @()
 
     foreach ($pol in $custom) {
         $cleanPol = Remove-ReadOnlyFields $pol
-        $scope    = Get-SafeProp $pol 'scope'
+        $scope = Get-SafeProp $pol 'scope'
 
         $policyRows += [PSCustomObject]@{
             ObjectType     = 'Policy'
@@ -492,7 +496,7 @@ function Export-Policies {
         }
     }
 
-    $polCsv  = Join-Path $OutputFolder 'NSX_Policies.csv'
+    $polCsv = Join-Path $OutputFolder 'NSX_Policies.csv'
     $ruleCsv = Join-Path $OutputFolder 'NSX_Rules.csv'
     $policyRows | Export-Csv -Path $polCsv  -NoTypeInformation -Encoding UTF8
     $ruleRows   | Export-Csv -Path $ruleCsv -NoTypeInformation -Encoding UTF8
@@ -549,19 +553,21 @@ try {
     Write-Log "Verifying connectivity to $NSXManager..." INFO
     $info = Invoke-NSXGet -Path "/api/v1/node"
     if ($info) { Write-Log "  Connected: NSX $($info.product_version)" SUCCESS }
-    else        { throw "Cannot connect to NSX Manager $NSXManager." }
+    else { throw "Cannot connect to NSX Manager $NSXManager." }
 
-    if ($ExportIPSets)   { Export-IPSets   }
+    if ($ExportIPSets) { Export-IPSets }
     if ($ExportServices) { Export-Services }
-    if ($ExportGroups)   { Export-Groups   }
+    if ($ExportGroups) { Export-Groups }
     if ($ExportProfiles) { Export-Profiles }
     if ($ExportPolicies) { Export-Policies }
-    if ($ExportTags)     { Export-Tags     }
+    if ($ExportTags) { Export-Tags }
 
-} catch {
+}
+catch {
     Write-Log "FATAL: $_" ERROR
     exit 1
-} finally {
+}
+finally {
     Write-Log "════════════════════════════════════════════" INFO
     Write-Log " EXPORT SUMMARY" INFO
     Write-Log "────────────────────────────────────────────" INFO
