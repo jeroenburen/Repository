@@ -1,0 +1,278 @@
+views:
+  - title: Witrikstraat 4
+    icon: mdi:home-lightning-bolt-outline
+    type: panel
+    cards:
+      - type: custom:layout-card
+        layout_type: custom:grid-layout
+        layout:
+          grid-template-columns: 1fr 1fr 1fr
+          grid-template-rows: auto
+          gap: 12px
+        cards:
+          - type: vertical-stack
+            view_layout:
+              grid-column: 1
+            cards:
+              - type: markdown
+                content: '# ⚡ Usage'
+                view_layout:
+                  grid-column: span 2
+              - type: custom:mini-graph-card
+                name: Grid usage — 7 days
+                icon: mdi:transmission-tower
+                entities:
+                  - entity: sensor.p1_meter_power
+                    name: Net power
+                hours_to_show: 168
+                points_per_hour: 1
+                line_width: 2
+                show:
+                  labels: false
+                  points: false
+                  legend: false
+              - type: entities
+                title: P1 meter
+                entities:
+                  - entity: sensor.p1_meter_power
+                    name: Active power
+                  - entity: sensor.p1_meter_power_phase_1
+                    name: Phase 1
+                  - entity: sensor.p1_meter_power_phase_2
+                    name: Phase 2
+                  - entity: sensor.p1_meter_power_phase_3
+                    name: Phase 3
+              - type: custom:mini-graph-card
+                name: Electricity Price — 7 days
+                icon: mdi:currency-eur
+                entities:
+                  - entity: sensor.witrikstraat_4_current_electricity_price
+                    name: Price
+                hours_to_show: 168
+                points_per_hour: 1
+                line_width: 2
+                show:
+                  labels: false
+                  points: false
+                  legend: false
+              - type: entities
+                title: Water meter
+                entities:
+                  - entity: sensor.water_meter_reading
+                    name: Meterstand
+          - type: vertical-stack
+            view_layout:
+              grid-column: 2
+            cards:
+              - type: markdown
+                content: '# ☀️ Production'
+              - type: custom:mini-graph-card
+                name: Solar production — 7 days
+                icon: mdi:solar-power
+                entities:
+                  - entity: sensor.pv_power
+                    name: PV power
+                    color: '#f9a825'
+                hours_to_show: 168
+                points_per_hour: 1
+                line_width: 2
+                color_thresholds:
+                  - value: 0
+                    color: '#f9a825'
+                show:
+                  labels: false
+                  points: false
+                  legend: false
+              - type: entities
+                title: Solar production
+                entities:
+                  - sensor.pv_power
+                  - sensor.today_s_pv_generation
+                  - sensor.total_pv_generation
+              - type: glance
+                title: Net flow
+                entities:
+                  - entity: sensor.p1_meter_power
+                    name: Net export
+                  - entity: sensor.pv_power
+                    name: PV power
+          - type: vertical-stack
+            cards:
+              - type: markdown
+                content: '# 🚙 Tesla'
+              - type: picture-entity
+                entity: binary_sensor.karrotenmobiel_charging
+                image: /local/tesla.png?v=2
+                show_name: false
+                show_state: false
+              - type: conditional
+                conditions:
+                  - entity: binary_sensor.karrotenmobiel_charger
+                    state: 'off'
+                card:
+                  type: tile
+                  entity: device_tracker.karrotenmobiel_location_tracker
+                  name: Tesla niet verbonden
+                  color: grey
+                  icon: mdi:car-off
+              - type: conditional
+                conditions:
+                  - entity: binary_sensor.karrotenmobiel_charger
+                    state: 'on'
+                card:
+                  type: entities
+                  title: Laden beheer
+                  show_header_toggle: false
+                  entities:
+                    - entity: device_tracker.tesla_location
+                      name: Locatie
+                    - entity: sensor.tesla_battery_level
+                      name: Accu
+                    - entity: sensor.witrikstraat_4_current_price_level
+                      name: Prijsniveau
+                    - entity: switch.karrotenmobiel_charger
+                      name: Laadstatus
+                    - entity: number.karrotenmobiel_charging_amps
+                      name: Laadsnelheid (Ampère)
+                    - entity: input_datetime.tesla_charge_ready_by
+                      name: Klaar met opladen
+                      icon: mdi:clock-check
+                    - entity: input_number.tesla_charge_target_soc
+                      name: Doel percentage
+                      icon: mdi:percent
+            view_layout:
+              grid-column: 3
+  - title: Heating & Cooling
+    icon: mdi:heat-wave
+    type: panel
+    cards:
+      - type: custom:layout-card
+        layout_type: custom:grid-layout
+        layout:
+          grid-template-columns: 1fr 1fr 1fr 1fr
+          grid-template-rows: auto
+          gap: 12px
+        cards:
+          - type: markdown
+            content: '# 🔥 Heating'
+            view_layout:
+              grid-column: span 2
+              grid-row: 1
+          - type: markdown
+            content: '# ❄️ Cooling'
+            view_layout:
+              grid-column: span 2
+              grid-row: 1
+          - type: vertical-stack
+            view_layout:
+              grid-column: 1
+              grid-row: 2
+            cards:
+              - type: thermostat
+                entity: climate.warmtepomp
+                features:
+                  - type: climate-hvac-modes
+                    hvac_modes:
+                      - 'off'
+                      - heat
+                      - auto
+                      - cool
+              - type: thermostat
+                entity: water_heater.warmtepomp
+          - type: vertical-stack
+            view_layout:
+              grid-column: 2
+              grid-row: 2
+            cards:
+              - type: thermostat
+                entity: climate.woonkamer
+              - type: entities
+                title: Warmtepomp stats
+                entities:
+                  - entity: sensor.warmtepomp_energy_this_month
+                    name: This month
+                  - entity: sensor.warmtepomp_energy_last_month
+                    name: Last month
+                  - entity: sensor.warmtepomp_energy_yesterday
+                    name: Yesterday
+                  - entity: sensor.warmtepomp_indoor_temperature
+                    name: Indoor temp
+                  - entity: sensor.warmtepomp_inlet_temperature
+                    name: Inlet temp
+                  - entity: sensor.warmtepomp_outlet_temperature
+                    name: Outlet temp
+          - type: vertical-stack
+            view_layout:
+              grid-column: 3
+              grid-row: 2
+            cards:
+              - type: thermostat
+                entity: climate.kantoor
+              - type: thermostat
+                entity: climate.slaapkamer
+          - type: vertical-stack
+            view_layout:
+              grid-column: 4
+              grid-row: 2
+            cards:
+              - type: thermostat
+                entity: climate.fenna
+              - type: thermostat
+                entity: climate.rens
+  - title: Garden Irrigation
+    icon: mdi:sprinkler
+    type: panel
+    cards:
+      - type: custom:layout-card
+        layout_type: custom:grid-layout
+        layout:
+          grid-template-columns: 1fr 1fr 1fr 1fr
+          grid-template-rows: auto
+          gap: 12px
+        cards:
+          - type: vertical-stack
+            view_layout:
+              grid-column: 2
+            cards:
+              - type: heading
+                heading: Weather Tracking
+              - type: entities
+                entities:
+                  - entity: input_number.maximum_temperature_measured
+                    name: Peak Temp Today
+                  - entity: sensor.openweathermap_temperature
+                    name: Current Temp
+                  - entity: input_number.total_rain_fallen
+                    name: Rain Fallen
+              - type: heading
+                heading: 48-Hour Trends
+              - type: history-graph
+                entities:
+                  - entity: sensor.openweathermap_temperature
+                    name: Temperature
+                  - entity: input_number.maximum_temperature_measured
+                    name: Recorded Max
+                hours_to_show: 48
+                refresh_interval: 0
+          - type: vertical-stack
+            cards:
+              - type: heading
+                heading: System Status
+              - type: gauge
+                entity: sensor.days_since_last_watering_day
+                min: 0
+                max: 10
+                severity:
+                  green: 0
+                  yellow: 4
+                  red: 6
+              - type: heading
+                heading: 48-Hour Trends
+              - type: history-graph
+                entities:
+                  - entity: input_number.total_rain_fallen
+                    name: Accumulated Rain
+                hours_to_show: 48
+                refresh_interval: 0
+            view_layout:
+              grid-column: 3

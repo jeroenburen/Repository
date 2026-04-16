@@ -1,83 +1,150 @@
 alias: "Tesla: Smart Charging"
 description: >
   Manages Tesla charging based on location, plug status, solar surplus, and
-  Tibber price levels. Handles wake-up, hysteresis, and rate limiting.
-mode: restart
+  Tibber price levels. Includes scheduled charging based on future prices, car
+  wake-up handling, hysteresis, rate limiting and notifications.
+
+  Required helpers:
+    - input_datetime.tesla_charge_ready_by  (time only, 00:00 = disabled)
+    - input_number.tesla_charge_target_soc  (default 80, min 20, max 100)
 triggers:
   - trigger: state
     entity_id: device_tracker.karrotenmobiel_location_tracker
     to: home
+    id: car_arrived
   - trigger: state
-    entity_id: binary_sensor.karrotenmobiel_plug
+    entity_id: binary_sensor.karrotenmobiel_charger
     to: "on"
+    id: plug_connected
   - trigger: state
-    entity_id: sensor.electricity_price_price_level_1_day
-  - trigger: state
+    entity_id: sensor.witrikstraat_4_current_price_level
+    id: price_changed
+  - trigger: numeric_state
     entity_id: sensor.p1_meter_power
+    below: -2000
+    for:
+      minutes: 5
+    id: solar_start
+  - trigger: numeric_state
+    entity_id: sensor.p1_meter_power
+    above: -100
+    for:
+      minutes: 5
+    id: solar_stop
+  - trigger: time_pattern
+    minutes: /15
+    id: schedule_check
 conditions:
   - condition: state
     entity_id: device_tracker.karrotenmobiel_location_tracker
     state: home
   - condition: state
-    entity_id: binary_sensor.karrotenmobiel_plug
+    entity_id: binary_sensor.karrotenmobiel_charger
     state: "on"
-  - condition: state
-    entity_id: input_boolean.tesla_fast_charge_selector
-    state: "off"
+  - condition: numeric_state
+    entity_id: sensor.karrotenmobiel_battery
+    below: input_number.tesla_charge_target_soc
 actions:
   - if:
-      - condition: not
-        conditions:
-          - condition: state
-            entity_id: sensor.karrotenmobiel_state_of_charge
-            state: unavailable
-    then: []
-    else:
-      - action: homeassistant.update_entity
+      - condition: template
+        value_template: |
+          {{ trigger.id != 'schedule_check'
+             and (
+               states('sensor.karrotenmobiel_battery') in ['unavailable', 'unknown']
+               or states('switch.karrotenmobiel_charger') in ['unavailable', 'unknown']
+               or states('number.karrotenmobiel_charging_amps') in ['unavailable', 'unknown']
+               or states('binary_sensor.karrotenmobiel_charger') in ['unavailable', 'unknown']
+             ) }}
+    then:
+      - action: button.press
         target:
-          entity_id: sensor.karrotenmobiel_state_of_charge
-      - delay:
-          seconds: 15
+          entity_id: button.karrotenmobiel_force_update
+      - variables:
+          wake_start: "{{ now().timestamp() }}"
+      - repeat:
+          sequence:
+            - delay:
+                seconds: 10
+            - action: homeassistant.update_entity
+              target:
+                entity_id:
+                  - sensor.karrotenmobiel_battery
+                  - switch.karrotenmobiel_charger
+                  - number.karrotenmobiel_charging_amps
+                  - binary_sensor.karrotenmobiel_charger
+          until:
+            - condition: template
+              value_template: |
+                {{ (
+                     states('sensor.karrotenmobiel_battery') not in ['unavailable', 'unknown']
+                     and states('switch.karrotenmobiel_charger') not in ['unavailable', 'unknown']
+                   )
+                   or (now().timestamp() - wake_start) > 90 }}
+      - if:
+          - condition: template
+            value_template: >
+              {{ states('sensor.karrotenmobiel_battery') in ['unavailable',
+              'unknown']
+                 or states('switch.karrotenmobiel_charger') in ['unavailable', 'unknown'] }}
+        then:
+          - action: persistent_notification.create
+            data:
+              title: Tesla Charging — Car Unreachable
+              message: |
+                Could not wake car after 90 seconds. Will retry on next trigger.
+              notification_id: tesla_charging_status
+          - stop: Car did not wake within timeout.
+  - variables:
+      target_soc: "{{ states('input_number.tesla_charge_target_soc') | int(80) }}"
+      price_level: "{{ states('sensor.witrikstraat_4_current_price_level') }}"
+      p1_power: "{{ states('sensor.p1_meter_power') | float(0) }}"
+      price_is_cheap: "{{ price_level in ['very_cheap', 'cheap'] }}"
+      solar_surplus_w: "{{ [p1_power * -1, 0] | max }}"
+      solar_amps: |
+        {{ [[((solar_surplus_w / 690) | int), 5] | max, 16] | min }}
+      has_solar: "{{ solar_surplus_w > 1400 }}"
+      ready_by: "{{ states('input_datetime.tesla_charge_ready_by') }}"
+      schedule_active: "{{ ready_by != '00:00:00' }}"
+      minutes_until_ready: |
+        {% if ready_by == '00:00:00' %}
+          0
+        {% else %}
+          {% set t = today_at(ready_by) %}
+          {% if t < now() %}
+            {{ ((t + timedelta(days=1) - now()).total_seconds() / 60) | int }}
+          {% else %}
+            {{ ((t - now()).total_seconds() / 60) | int }}
+          {% endif %}
+        {% endif %}
+      current_price: "{{ states('sensor.witrikstraat_4_current_price') | float(999) }}"
+      price_next_5h: "{{ states('sensor.witrikstraat_4_price_next_5h') | float(999) }}"
+      price_is_good_for_schedule: |
+        {{ current_price <= price_next_5h or minutes_until_ready < 120 }}
+      trigger_reason: >
+        {% if trigger.id == 'car_arrived' %} Car arrived home {% elif trigger.id
+        == 'plug_connected' %} Charger plugged in {% elif trigger.id ==
+        'price_changed' %} Energy price changed to {{ price_level }} {% elif
+        trigger.id == 'solar_start' %} Solar surplus above 2000W for 5 minutes
+        {% elif trigger.id == 'solar_stop' %} Solar surplus dropped for 5
+        minutes {% elif trigger.id == 'schedule_check' %} Scheduled price check
+        {% else %} Manual Trigger {% endif %}
   - if:
-      - condition: numeric_state
-        entity_id: sensor.karrotenmobiel_state_of_charge
-        above: 100
+      - condition: template
+        value_template: |
+          {{ states('sensor.karrotenmobiel_battery') | int(0) >= target_soc }}
     then:
       - action: switch.turn_off
         target:
           entity_id: switch.karrotenmobiel_charger
-        data: {}
-      - stop: Battery at charge limit, stopping.
-  - if:
-      - condition: template
-        value_template: |
-          {{ trigger.entity_id == 'sensor.p1_meter_power' }}
-    then:
-      - wait_for_trigger:
-          - trigger: state
-            entity_id: sensor.p1_meter_power
-        timeout:
-          minutes: 5
-        continue_on_timeout: true
-      - condition: state
-        entity_id: device_tracker.karrotenmobiel_location_tracker
-        state: home
-      - condition: state
-        entity_id: binary_sensor.karrotenmobiel_plug
-        state: "on"
-  - variables:
-      price_level: "{{ states('sensor.electricity_price_price_level_1_day') }}"
-      p1_power: "{{ states('sensor.p1_meter_power') | float(0) }}"
-      price_is_cheap: |
-        {{ price_level in ['VERY_CHEAP', 'CHEAP'] }}
-      solar_surplus_watt: |
-        {{ [p1_power * -1, 0] | max }}
-      solar_amps_raw: |
-        {{ (solar_surplus_watt / 690) | int }}
-      solar_amps: |
-        {{ [[solar_amps_raw, 5] | max, 16] | min }}
-      has_solar: |
-        {{ solar_surplus_watt > 2000 }}
+      - action: persistent_notification.create
+        data:
+          title: Tesla Charging stopped
+          message: |
+            Battery has reached {{ target_soc }}% target. Charging stopped.
+            Trigger: {{ trigger_reason }}
+            Battery: {{ states('sensor.karrotenmobiel_battery') }}%
+          notification_id: tesla_charging_status
+      - stop: Battery at charge limit.
   - choose:
       - conditions:
           - condition: template
@@ -85,8 +152,9 @@ actions:
         sequence:
           - if:
               - condition: template
-                value_template: |
-                  {{ states('number.karrotenmobiel_charging_amps') | int != 16
+                value_template: >
+                  {{ states('number.karrotenmobiel_charging_amps') | int(-1) !=
+                  16
                      or states('switch.karrotenmobiel_charger') == 'off' }}
             then:
               - action: number.set_value
@@ -97,6 +165,17 @@ actions:
               - action: switch.turn_on
                 target:
                   entity_id: switch.karrotenmobiel_charger
+              - action: persistent_notification.create
+                data:
+                  title: Tesla Charging started
+                  message: >
+                    Charging at full speed (16A) because the energy price is {{
+                    price_level }}.
+
+                    Trigger: {{ trigger_reason }}
+
+                    Battery: {{ states('sensor.karrotenmobiel_battery') }}%
+                  notification_id: tesla_charging_status
       - conditions:
           - condition: template
             value_template: "{{ has_solar }}"
@@ -104,7 +183,7 @@ actions:
           - if:
               - condition: template
                 value_template: >
-                  {{ states('number.karrotenmobiel_charging_amps') | int !=
+                  {{ states('number.karrotenmobiel_charging_amps') | int(-1) !=
                   solar_amps
                      or states('switch.karrotenmobiel_charger') == 'off' }}
             then:
@@ -116,9 +195,64 @@ actions:
               - action: switch.turn_on
                 target:
                   entity_id: switch.karrotenmobiel_charger
+              - action: persistent_notification.create
+                data:
+                  title: Tesla Charging started (Solar)
+                  message: >
+                    Charging on solar surplus at {{ solar_amps }}A ({{
+                    solar_surplus_w | int }}W export / 690W per phase).
+
+                    Trigger: {{ trigger_reason }}
+
+                    Battery: {{ states('sensor.karrotenmobiel_battery') }}%
+                  notification_id: tesla_charging_status
       - conditions:
           - condition: template
-            value_template: "{{ not price_is_cheap and not has_solar }}"
+            value_template: |
+              {{ schedule_active
+                 and price_is_good_for_schedule
+                 and minutes_until_ready > 0
+                 and minutes_until_ready < 480 }}
+        sequence:
+          - if:
+              - condition: template
+                value_template: >
+                  {{ states('number.karrotenmobiel_charging_amps') | int(-1) !=
+                  16
+                     or states('switch.karrotenmobiel_charger') == 'off' }}
+            then:
+              - action: number.set_value
+                target:
+                  entity_id: number.karrotenmobiel_charging_amps
+                data:
+                  value: 16
+              - action: switch.turn_on
+                target:
+                  entity_id: switch.karrotenmobiel_charger
+              - action: persistent_notification.create
+                data:
+                  title: Tesla Charging started (Scheduled)
+                  message: >
+                    Charging at 16A — current price ({{ current_price }}) is at
+                    or below average next 5h ({{ price_next_5h }}), or deadline
+                    is within 2h.
+
+                    Ready by: {{ ready_by }} ({{ minutes_until_ready }} min
+                    away).
+
+                    Trigger: {{ trigger_reason }}
+
+                    Battery: {{ states('sensor.karrotenmobiel_battery') }}%
+                  notification_id: tesla_charging_status
+      - conditions:
+          - condition: template
+            value_template: |
+              {{ not price_is_cheap
+                 and not has_solar
+                 and not (schedule_active
+                          and price_is_good_for_schedule
+                          and minutes_until_ready > 0
+                          and minutes_until_ready < 480) }}
         sequence:
           - if:
               - condition: state
@@ -128,3 +262,15 @@ actions:
               - action: switch.turn_off
                 target:
                   entity_id: switch.karrotenmobiel_charger
+          - action: persistent_notification.create
+            data:
+              title: Tesla — Not Charging
+              message: >
+                No solar surplus, price is {{ price_level }}, and no active
+                schedule.
+
+                Trigger: {{ trigger_reason }}
+
+                Battery: {{ states('sensor.karrotenmobiel_battery') }}%
+              notification_id: tesla_charging_status
+mode: restart
