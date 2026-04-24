@@ -41,8 +41,8 @@ db.exec(`
 `);
 
 // Migrate existing DB: add columns if missing
-try { db.exec(`ALTER TABLE metingen ADD COLUMN laadvergoeding REAL NOT NULL DEFAULT 0`); } catch(e) { /* already exists */ }
-try { db.exec(`ALTER TABLE metingen ADD COLUMN teruglevering_vergoeding REAL NOT NULL DEFAULT 0`); } catch(e) { /* already exists */ }
+try { db.exec(`ALTER TABLE metingen ADD COLUMN laadvergoeding REAL NOT NULL DEFAULT 0`); } catch (e) { /* already exists */ }
+try { db.exec(`ALTER TABLE metingen ADD COLUMN teruglevering_vergoeding REAL NOT NULL DEFAULT 0`); } catch (e) { /* already exists */ }
 
 // ─── Live inverter cache ─────────────────────────────────────────────────────
 // Voorkomt dat elke page-refresh een UDP-query afvuurt; max 1x per 30 sec.
@@ -58,11 +58,11 @@ async function getLiveData() {
   try {
     const data = await testLocalInverter(ip);
     if (data.reachable && data.e_day != null) {
-      liveCache  = data;
+      liveCache = data;
       liveCacheTs = now;
     }
     return data;
-  } catch(e) { return { reachable: false, error: e.message }; }
+  } catch (e) { return { reachable: false, error: e.message }; }
 }
 
 // ─── Dagelijkse auto-sync (cron) ─────────────────────────────────────────────
@@ -89,7 +89,7 @@ async function dailySync() {
       // Invalideer live cache zodat dashboard direct verse data krijgt
       liveCache = null;
     }
-  } catch(e) { console.error('Dagelijkse sync fout:', e.message); }
+  } catch (e) { console.error('Dagelijkse sync fout:', e.message); }
 }
 
 function scheduleDailySync() {
@@ -98,7 +98,7 @@ function scheduleDailySync() {
   next22.setHours(22, 0, 0, 0);
   if (next22 <= now) next22.setDate(next22.getDate() + 1);
   const msUntil = next22 - now;
-  console.log(`Volgende dagelijkse sync om 22:00 (over ${Math.round(msUntil/60000)} min)`);
+  console.log(`Volgende dagelijkse sync om 22:00 (over ${Math.round(msUntil / 60000)} min)`);
   setTimeout(() => {
     dailySync();
     setInterval(dailySync, 24 * 60 * 60 * 1000);
@@ -137,7 +137,7 @@ function httpsPost(url, headers, body) {
     const req = https.request({ hostname: u.hostname, path: u.pathname + u.search, method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data), ...headers } }, res => {
       let buf = '';
       res.on('data', d => buf += d);
-      res.on('end', () => { try { resolve(JSON.parse(buf)); } catch(e) { reject(new Error('Invalid JSON: ' + buf.slice(0,200))); } });
+      res.on('end', () => { try { resolve(JSON.parse(buf)); } catch (e) { reject(new Error('Invalid JSON: ' + buf.slice(0, 200))); } });
     });
     req.on('error', reject);
     req.write(data);
@@ -186,7 +186,7 @@ async function fetchTibber(token) {
     if (!monthly[y]) monthly[y] = {};
     if (!monthly[y][m]) monthly[y][m] = {};
     monthly[y][m].verbruik = node.consumption || 0;
-    monthly[y][m].kosten   = node.cost || 0;
+    monthly[y][m].kosten = node.cost || 0;
   }
 
   // Production: teruggeleverd (kWh) + vergoeding (€ = profit)
@@ -196,7 +196,7 @@ async function fetchTibber(token) {
     if (!monthly[y]) monthly[y] = {};
     if (!monthly[y][m]) monthly[y][m] = {};
     if (node.production != null) monthly[y][m].teruggeleverd = node.production;
-    if (node.profit     != null) monthly[y][m].teruglevering_vergoeding = node.profit;
+    if (node.profit != null) monthly[y][m].teruglevering_vergoeding = node.profit;
   }
 
   return monthly;
@@ -276,7 +276,7 @@ async function goodweLogin(email, password) {
         };
       }
       errors.push(`${host} v2: code=${res.code} msg=${res.msg || ''}`);
-    } catch(e) { errors.push(`${host} v2: ${e.message}`); }
+    } catch (e) { errors.push(`${host} v2: ${e.message}`); }
   }
 
   // 2. Classic semsportal.com v1 — bewezen werkend tot 30 mei 2026
@@ -298,7 +298,7 @@ async function goodweLogin(email, password) {
         };
       }
       errors.push(`semsportal.com v1 (${pwd === md5pwd ? 'MD5' : 'plain'}): ${res.msg || 'geen token'}`);
-    } catch(e) { errors.push(`semsportal.com v1: ${e.message}`); }
+    } catch (e) { errors.push(`semsportal.com v1: ${e.message}`); }
   }
 
   // 3. Nieuw SEMSPlus portaal (HAR-analyse, x-signature — kan c0602 geven)
@@ -322,7 +322,7 @@ async function goodweLogin(email, password) {
       };
     }
     errors.push(`SEMSPlus nieuw: code=${res.code} desc=${res.description || ''}`);
-  } catch(e) {
+  } catch (e) {
     errors.push(`SEMSPlus nieuw: ${e.message}`);
   }
 
@@ -344,7 +344,7 @@ async function goodweLogin(email, password) {
           portal: 'semsplus_old',
         };
       }
-    } catch(e) { errors.push(`SEMSPlus oud (${pwd === md5pwd ? 'MD5' : 'plain'}): ${e.message}`); }
+    } catch (e) { errors.push(`SEMSPlus oud (${pwd === md5pwd ? 'MD5' : 'plain'}): ${e.message}`); }
   }
 
   throw new Error('GoodWe login mislukt op alle portals. ' + errors.join(' | '));
@@ -363,9 +363,9 @@ async function fetchGoodweMonthly(auth, stationId) {
     for (let yr = currentYear - 2; yr <= currentYear; yr++) {
       for (let mo = 1; mo <= 12; mo++) {
         if (yr === currentYear && mo > new Date().getMonth() + 1) break;
-        const startTime = `${yr}-${String(mo).padStart(2,'0')}-01 00:00:00`;
+        const startTime = `${yr}-${String(mo).padStart(2, '0')}-01 00:00:00`;
         const endDay = new Date(yr, mo, 0).getDate();
-        const endTime = `${yr}-${String(mo).padStart(2,'0')}-${endDay} 23:59:59`;
+        const endTime = `${yr}-${String(mo).padStart(2, '0')}-${endDay} 23:59:59`;
         try {
           const body = {
             stationId,
@@ -384,7 +384,7 @@ async function fetchGoodweMonthly(auth, stationId) {
             if (genStat && genStat.eTotal !== undefined) monthly[yr][mo].opgewekt = genStat.eTotal;
             else if (genStat && genStat.eMonth !== undefined) monthly[yr][mo].opgewekt = genStat.eMonth;
           }
-        } catch(e) { /* skip */ }
+        } catch (e) { /* skip */ }
       }
     }
 
@@ -411,7 +411,7 @@ async function fetchGoodweMonthly(auth, stationId) {
               if (!monthly[yr][mo].opgewekt && pt.value !== undefined) monthly[yr][mo].opgewekt = pt.value;
             });
           }
-        } catch(e) { /* skip */ }
+        } catch (e) { /* skip */ }
       }
     }
     return monthly;
@@ -448,7 +448,7 @@ async function fetchGoodweMonthly(auth, stationId) {
           // Note: teruggeleverd (eSell) is NOT stored here - Tibber provides it
         });
       }
-    } catch(e) { /* skip */ }
+    } catch (e) { /* skip */ }
 
     // Fallback: GetChartByPlant
     const hasData = monthly[yr] && Object.values(monthly[yr]).some(v => v.opgewekt > 0);
@@ -469,7 +469,7 @@ async function fetchGoodweMonthly(auth, stationId) {
             });
           }
         }
-      } catch(e) { /* skip */ }
+      } catch (e) { /* skip */ }
     }
   }
   return monthly;
@@ -536,7 +536,7 @@ function udpRequest(host, port, queryBuf, timeoutMs = 5000) {
       reject(new Error(`Timeout na ${timeoutMs}ms`));
     }, timeoutMs);
     sock.on('message', msg => { clearTimeout(timer); sock.close(); resolve(msg); });
-    sock.on('error', err => { clearTimeout(timer); try { sock.close(); } catch(e) {} reject(err); });
+    sock.on('error', err => { clearTimeout(timer); try { sock.close(); } catch (e) { } reject(err); });
     sock.send(queryBuf, 0, queryBuf.length, port, host,
       err => { if (err) { clearTimeout(timer); reject(err); } });
   });
@@ -569,23 +569,23 @@ function parseAA55ModbusResponse(buf) {
 
   const v = r16u(18);
   const f = r16u(24);
-  const p = r16u(39);
+  const p = r16u(28);
   const t = r16u(41);
   const ed = r16u(44);
   const pg = r16s(46);
   const et = r32u(47);
 
   return {
-    familie:      'ET/ES 3-fase',
-    data_bytes:   byteCount,
-    raw_hex:      buf.toString('hex'),
-    v_grid:       v  != null ? v / 10   : null,   // V
-    f_grid:       f  != null ? f / 100  : null,   // Hz
-    p_pv:         p,                               // W huidig PV vermogen
-    temp:         t  != null ? t / 10   : null,   // °C
-    e_day:        ed != null ? ed / 10  : null,   // kWh vandaag
-    p_grid:       pg,                              // W (negatief = teruglevering)
-    e_total:      et != null ? et / 10  : null,   // kWh cumulatief
+    familie: 'ET/ES 3-fase',
+    data_bytes: byteCount,
+    raw_hex: buf.toString('hex'),
+    v_grid: v != null ? v / 10 : null,   // V
+    f_grid: f != null ? f / 100 : null,   // Hz
+    p_pv: p,                               // W huidig PV vermogen
+    temp: t != null ? t / 10 : null,   // °C
+    e_day: ed != null ? ed / 10 : null,   // kWh vandaag
+    p_grid: pg,                              // W (negatief = teruglevering)
+    e_total: et != null ? et / 10 : null,   // kWh cumulatief
   };
 }
 
@@ -599,14 +599,14 @@ async function testLocalInverter(host, port = 8899) {
       const modelStr = modelBytes.toString('latin1').replace(/[\x00-\x1f]/g, '').trim();
       if (modelStr.length > 2) model = modelStr;
     }
-  } catch(e) {
+  } catch (e) {
     return { reachable: false, error: e.message };
   }
 
   // Stap 2: Modbus RTU query — 7f 03 75 94 00 49 d5 c2
   const modbusQuery = buildModbusQuery(0x7F, 30100, 73);
   try {
-    const resp   = await udpRequest(host, port, modbusQuery, 5000);
+    const resp = await udpRequest(host, port, modbusQuery, 5000);
     const parsed = parseAA55ModbusResponse(resp);
     if (parsed && parsed.e_day != null) {
       return { reachable: true, model, ...parsed };
@@ -617,7 +617,7 @@ async function testLocalInverter(host, port = 8899) {
       raw_hex: resp ? resp.toString('hex') : null,
       error: parsed ? 'Parsering gaf geen e_day' : 'Onverwacht responsformaat',
     };
-  } catch(e) {
+  } catch (e) {
     return { reachable: true, model, error: `Modbus query mislukt: ${e.message}` };
   }
 }
@@ -691,7 +691,7 @@ app.get('/api/debug/inverter', async (req, res) => {
   try {
     const result = await testLocalInverter(ip);
     res.json(result);
-  } catch(e) {
+  } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
@@ -722,19 +722,19 @@ app.get('/api/debug/tibber', async (req, res) => {
 
     const home = raw?.data?.viewer?.homes?.[0];
     const consumptionNodes = home?.consumption?.nodes || [];
-    const productionNodes  = home?.production?.nodes  || [];
+    const productionNodes = home?.production?.nodes || [];
 
     // 2. Parsed result (what the sync would store)
     const parsed = await fetchTibber(token);
 
     res.json({
       raw_consumption_count: consumptionNodes.length,
-      raw_production_count:  productionNodes.length,
-      raw_production_nodes:  productionNodes,   // full list — key for diagnosis
-      parsed_monthly:        parsed,
-      graphql_errors:        raw.errors || null,
+      raw_production_count: productionNodes.length,
+      raw_production_nodes: productionNodes,   // full list — key for diagnosis
+      parsed_monthly: parsed,
+      graphql_errors: raw.errors || null,
     });
-  } catch(e) {
+  } catch (e) {
     res.status(500).json({ error: e.message, stack: e.stack });
   }
 });
@@ -779,7 +779,7 @@ app.post('/api/sync', async (req, res) => {
         }
       }
       results.tibber = `${count} maanden bijgewerkt`;
-    } catch(e) { results.errors.push('Tibber: ' + e.message); }
+    } catch (e) { results.errors.push('Tibber: ' + e.message); }
   }
 
   // GoodWe
@@ -811,7 +811,7 @@ app.post('/api/sync', async (req, res) => {
       }
       const portalLabel = portal === 'semsplus_new' ? 'SEMSPlus (nieuw)' : portal === 'semsplus_old' ? 'SEMSPlus (oud)' : portal === 'sems_v2' ? 'semsportal.com v2' : 'semsportal.com';
       results.goodwe = `${count} maanden bijgewerkt via ${portalLabel}`;
-    } catch(e) {
+    } catch (e) {
       results.errors.push('GoodWe cloud: ' + e.message);
 
       // Fallback: gebruik dagmetingen van lokale omvormer als cloud onbereikbaar is
@@ -856,7 +856,7 @@ app.post('/api/sync', async (req, res) => {
             // Verwijder de cloud-fout want we hebben een werkend alternatief
             results.errors = results.errors.filter(e => !e.startsWith('GoodWe cloud:'));
           }
-        } catch(fe) { results.errors.push('GoodWe fallback: ' + fe.message); }
+        } catch (fe) { results.errors.push('GoodWe fallback: ' + fe.message); }
       }
     }
   }

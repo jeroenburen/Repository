@@ -291,7 +291,7 @@ if ($RulesFile) {
         $step3Params['PoliciesOut']  = $PoliciesOut
     }
 
-    & "$scriptDir\Sanitize-NSXFirewallRules.ps1" @step3Params
+    & "$scriptDir\Sanitize-NSXFirewallRules1.3.5.ps1" @step3Params
 }
 
 # ---------------------------------------------------------------------------

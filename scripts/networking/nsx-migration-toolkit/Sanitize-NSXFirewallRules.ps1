@@ -1,6 +1,6 @@
 # =============================================================================
 # Sanitize-NSXFirewallRules.ps1
-# Version 1.3.4
+# Version 1.3.5
 #
 # PURPOSE
 # -------
@@ -86,6 +86,14 @@
 # -------------------------
 # All fields not explicitly listed above are left as-is.
 #
+# RULE ID MAPPING FILE FORMAT
+# ----------------------------
+# The rules mapping CSV contains three columns: PolicyId, OldId, NewId.
+# PolicyId scopes each entry to the policy it belongs to, because the same
+# rule Id can legally appear in multiple policies. The compare script uses
+# this to build a per-policy lookup rather than a flat hashtable, avoiding
+# collisions when duplicate rule Ids exist across different policies.
+#
 # USAGE
 # -----
 #   # Standalone - load the mapping from a CSV produced by Sanitize-NSXGroups.ps1:
@@ -149,14 +157,16 @@ if ($PoliciesFile -and -not $PoliciesOut) {
 if ($IdMap -and $IdMap.Count -gt 0) {
     $idMap = $IdMap
     Write-Host "  [Rules/Policies] Using provided ID map ($($idMap.Count) entries)." -ForegroundColor Cyan
-} elseif ($MappingFile) {
+}
+elseif ($MappingFile) {
     Write-Host "  [Rules/Policies] Loading mapping from: $MappingFile" -ForegroundColor Cyan
     $idMap = @{}
     Import-Csv -Path $MappingFile | ForEach-Object {
         $idMap[$_.OldId] = $_.NewId
     }
     Write-Host "  [Rules/Policies] Loaded $($idMap.Count) mapping(s)." -ForegroundColor Yellow
-} else {
+}
+else {
     Write-Error "Provide either -IdMap <hashtable> or -MappingFile <path>."
     exit 1
 }
@@ -173,9 +183,9 @@ if ($IdMap -and $IdMap.Count -gt 0) {
 function Decode-UnicodeEscapes {
     param([string]$text)
     return [regex]::Replace($text, '\\u([0-9a-fA-F]{4})', {
-        param($m)
-        [char][convert]::ToInt32($m.Groups[1].Value, 16)
-    })
+            param($m)
+            [char][convert]::ToInt32($m.Groups[1].Value, 16)
+        })
 }
 
 # Rewrite /groups/<oldId> path segments anywhere in a string.
@@ -212,7 +222,7 @@ function Update-GroupColumn {
     # values meaning "all groups" and should not be modified.
     if ([string]::IsNullOrWhiteSpace($value) -or $value -eq 'ANY') { return $value }
 
-    $parts   = $value -split ';' | ForEach-Object { $_.Trim() }
+    $parts = $value -split ';' | ForEach-Object { $_.Trim() }
     $updated = $parts | ForEach-Object { Update-GroupPaths -text $_ }
     return $updated -join '; '
 }
@@ -246,7 +256,7 @@ function Update-ServicePaths {
 function Update-ServiceColumn {
     param([string]$value)
     if ([string]::IsNullOrWhiteSpace($value) -or $value -eq 'ANY') { return $value }
-    $parts   = $value -split ';' | ForEach-Object { $_.Trim() }
+    $parts = $value -split ';' | ForEach-Object { $_.Trim() }
     $updated = $parts | ForEach-Object { Update-ServicePaths -text $_ }
     return $updated -join '; '
 }
@@ -264,7 +274,8 @@ function Sanitize-Id {
 if ($PoliciesFile) {
     if (-not (Test-Path $PoliciesFile)) {
         Write-Warning "  [Policies] File not found, skipping: $PoliciesFile"
-    } else {
+    }
+    else {
         Write-Host "  [Policies] Reading: $PoliciesFile" -ForegroundColor Cyan
         $policyRows = Import-Csv -Path $PoliciesFile
 
@@ -304,14 +315,14 @@ if ($PoliciesFile) {
         foreach ($row in $policyRows) {
             $sanitized = Sanitize-Id $row.DisplayName
             if ($displayCount.ContainsKey($sanitized)) { $displayCount[$sanitized]++ }
-            else                                        { $displayCount[$sanitized] = 1 }
+            else { $displayCount[$sanitized] = 1 }
         }
 
         # Pass 2 - assign newIds with deduplication suffixes where needed
         $displayCounter = @{}
         $mappingLog = [System.Collections.Generic.List[PSCustomObject]]::new()
         foreach ($row in $policyRows) {
-            $oldId     = $row.Id.Trim()
+            $oldId = $row.Id.Trim()
             $sanitized = Sanitize-Id $row.DisplayName
 
             if ($displayCount[$sanitized] -gt 1) {
@@ -320,13 +331,14 @@ if ($PoliciesFile) {
                 $displayCounter[$sanitized]++
                 $newId = "$sanitized-$suffix"
                 Write-Warning "  [Policies] Duplicate DisplayName '$sanitized' - assigned '$newId' to Id '$oldId'."
-            } else {
+            }
+            else {
                 $newId = $sanitized
             }
 
             if ($oldId -ne $newId) {
                 if ($policyIdMap.ContainsKey($oldId)) { Write-Warning "  [Policies] Duplicate old Id '$oldId' - skipping." }
-                else                                   { $policyIdMap[$oldId] = $newId }
+                else { $policyIdMap[$oldId] = $newId }
             }
 
             $mappingLog.Add([PSCustomObject]@{ OldId = $oldId; NewId = $newId })
@@ -348,7 +360,7 @@ if ($PoliciesFile) {
                 $newId = $policyIdMap[$oldId]
 
                 # Update CSV columns
-                $row.Id          = $newId
+                $row.Id = $newId
                 $row.DisplayName = $newId
 
                 # Rewrite "id", "relative_path", "path", and "display_name" in RawJson.
@@ -356,22 +368,22 @@ if ($PoliciesFile) {
                 # on the same JSON object - the RawJson field may still contain the legacy
                 # suffix at this point (it was never touched in 3a), so matching by display
                 # name would be unreliable. Using a lookahead on the old Id is the safe anchor.
-                $esc         = [regex]::Escape($oldId)
-                $json        = $row.RawJson
-                $json        = $json -replace """id"":""$esc""",                                             """id"":""$newId"""
-                $json        = $json -replace """relative_path"":""$esc""",                                  """relative_path"":""$newId"""
-                $json        = [regex]::Replace($json, """display_name"":""[^""]*""(?=[^}]*""id"":""$esc"")", """display_name"":""$newId""")
-                $json        = $json -replace """path"":""/infra/domains/default/security-policies/$esc""",   """path"":""/infra/domains/default/security-policies/$newId"""
+                $esc = [regex]::Escape($oldId)
+                $json = $row.RawJson
+                $json = $json -replace """id"":""$esc""", """id"":""$newId"""
+                $json = $json -replace """relative_path"":""$esc""", """relative_path"":""$newId"""
+                $json = [regex]::Replace($json, """display_name"":""[^""]*""(?=[^}]*""id"":""$esc"")", """display_name"":""$newId""")
+                $json = $json -replace """path"":""/infra/domains/default/security-policies/$esc""", """path"":""/infra/domains/default/security-policies/$newId"""
                 $row.RawJson = $json
             }
 
             # Update group paths in the Scope column and RawJson scope[] array
-            $row.Scope   = Update-GroupColumn -value $row.Scope
-            $row.RawJson = Update-GroupPaths  -text  $row.RawJson
+            $row.Scope = Update-GroupColumn -value $row.Scope
+            $row.RawJson = Update-GroupPaths -text $row.RawJson
 
             # Remove tags from RawJson and clear the Tags CSV column.
             $row.RawJson = Remove-Tags -json $row.RawJson
-            $row.Tags    = ''
+            $row.Tags = ''
 
             $after = $row | ConvertTo-Json -Compress
             if ($before -ne $after) { $policiesUpdated++ }
@@ -407,36 +419,36 @@ foreach ($row in $ruleRows) {
     $before = $row | ConvertTo-Json -Compress
 
     # --- NEW ID SANITIZATION LOGIC ---
-    $oldRuleId   = $row.Id.Trim()
-    $oldDisplay  = $row.DisplayName.Trim()
-    $newRuleId   = Sanitize-Id $oldDisplay
+    $oldRuleId = $row.Id.Trim()
+    $oldDisplay = $row.DisplayName.Trim()
+    $newRuleId = Sanitize-Id $oldDisplay
 
     if ($oldRuleId -ne $newRuleId) {
         # Update CSV columns
-        $row.Id          = $newRuleId
+        $row.Id = $newRuleId
         $row.DisplayName = $newRuleId
 
         # Update "id", "relative_path", "display_name", and the rule segment of "path" in RawJson
-        $escOldId      = [regex]::Escape($oldRuleId)
+        $escOldId = [regex]::Escape($oldRuleId)
         $escOldDisplay = [regex]::Escape($oldDisplay)
-        $row.RawJson = $row.RawJson -replace """id"":""$escOldId""",                    """id"":""$newRuleId"""
-        $row.RawJson = $row.RawJson -replace """relative_path"":""$escOldId""",         """relative_path"":""$newRuleId"""
-        $row.RawJson = $row.RawJson -replace """display_name"":""$escOldDisplay""",     """display_name"":""$newRuleId"""
+        $row.RawJson = $row.RawJson -replace """id"":""$escOldId""", """id"":""$newRuleId"""
+        $row.RawJson = $row.RawJson -replace """relative_path"":""$escOldId""", """relative_path"":""$newRuleId"""
+        $row.RawJson = $row.RawJson -replace """display_name"":""$escOldDisplay""", """display_name"":""$newRuleId"""
 
         # This regex ensures we only replace the rule ID at the end of the path string
         $row.RawJson = [regex]::Replace($row.RawJson, "(/rules/)$escOldId(?=""|$)", "/rules/$newRuleId")
 
-        $mappingLog.Add([PSCustomObject]@{ OldId = $oldRuleId; NewId = $newRuleId })
+        $mappingLog.Add([PSCustomObject]@{ PolicyId = $row.PolicyId; OldId = $oldRuleId; NewId = $newRuleId })
     }
 
     $row.SourceGroups = Update-GroupColumn   -value $row.SourceGroups
-    $row.DestGroups   = Update-GroupColumn   -value $row.DestGroups
-    $row.AppliedTo    = Update-GroupColumn   -value $row.AppliedTo
-    $row.Services     = Update-ServiceColumn -value $row.Services
+    $row.DestGroups = Update-GroupColumn   -value $row.DestGroups
+    $row.AppliedTo = Update-GroupColumn   -value $row.AppliedTo
+    $row.Services = Update-ServiceColumn -value $row.Services
     
     # Rewrite PolicyId and PolicyName CSV columns
     if ($policyIdMap.ContainsKey($row.PolicyId)) {
-        $row.PolicyId   = $policyIdMap[$row.PolicyId]
+        $row.PolicyId = $policyIdMap[$row.PolicyId]
         $row.PolicyName = $row.PolicyId   # PolicyName mirrors the new Id
     }
     # RawJson contains the same group paths inside source_groups[],
@@ -447,7 +459,7 @@ foreach ($row in $ruleRows) {
 
     # Rewrite path and parent_path in RawJson
     foreach ($oldPolicyId in $policyIdMap.Keys) {
-        $escPolicy   = [regex]::Escape($oldPolicyId)
+        $escPolicy = [regex]::Escape($oldPolicyId)
         $newPolicyId = $policyIdMap[$oldPolicyId]
 
         $row.RawJson = [regex]::Replace(
@@ -464,7 +476,7 @@ foreach ($row in $ruleRows) {
 
     # Remove tags from RawJson and clear the Tags CSV column.
     $row.RawJson = Remove-Tags -json $row.RawJson
-    $row.Tags    = ''
+    $row.Tags = ''
 
     $after = $row | ConvertTo-Json -Compress
     if ($before -ne $after) { $rulesUpdated++ }
