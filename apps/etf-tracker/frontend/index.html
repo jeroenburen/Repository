@@ -315,9 +315,9 @@ async function loadLatestSnapshot() {
 }
 
 function renderPositions() {
-  if (!positions.length) return;
-  let html = `<table class="pos-table"><thead><tr><th>Product</th><th>Waarde</th><th>Huidig %</th><th>Doel %</th><th>Afwijking</th></tr></thead><tbody>`;
-  positions.forEach(p => {
+  if (!positions.length) { document.getElementById('positions-content').innerHTML = '<div class="empty"><div class="empty-icon">📊</div>Geen posities</div>'; return; }
+  let html = `<table class="pos-table"><thead><tr><th>Product</th><th>Waarde</th><th>Huidig %</th><th>Doel %</th><th>Afwijking</th><th></th></tr></thead><tbody>`;
+  positions.forEach((p, i) => {
     const target = targets[p.product] || 0;
     const dev = p.pct - target;
     const absdev = Math.abs(dev);
@@ -333,10 +333,34 @@ function renderPositions() {
         <div class="dev-bar"><div class="dev-fill" style="width:${barPct}%"></div></div>
         <span class="dev-text">${dev>=0?'+':''}${dev.toFixed(1)}%</span>
       </div></td>
+      <td><button class="btn btn-danger" onclick="removePosition(${i})" title="Verwijder positie">✕</button></td>
     </tr>`;
   });
   html += `</tbody></table>`;
   document.getElementById('positions-content').innerHTML = html;
+}
+
+async function removePosition(index) {
+  const removed = positions[index];
+  if (!confirm(`Weet je zeker dat je "${removed.product}" wilt verwijderen?`)) return;
+  positions = positions.filter((_, i) => i !== index);
+  try {
+    const res = await fetch(API + '/snapshots/latest/positions', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({positions})
+    });
+    const data = await res.json();
+    if (data.error) { toast(data.error, true); return; }
+    positions = data.positions;
+    const total = data.total;
+    renderPositions();
+    renderDonut();
+    document.getElementById('kpi-total').textContent = '€' + total.toLocaleString('nl-NL', {minimumFractionDigits:2, maximumFractionDigits:2});
+    document.getElementById('kpi-positions').textContent = positions.length;
+    await loadWealthChart();
+    toast(`"${removed.product}" verwijderd`);
+  } catch(e) { toast('Fout bij verwijderen: ' + e.message, true); }
 }
 
 async function saveTarget(product, value) {

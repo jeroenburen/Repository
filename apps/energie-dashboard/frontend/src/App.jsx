@@ -2,11 +2,11 @@ import { useState, useEffect } from "react";
 import { AreaChart, Area, BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
 
 const API = "/api";
-const MAANDEN = ["Jan","Feb","Mrt","Apr","Mei","Jun","Jul","Aug","Sep","Okt","Nov","Dec"];
-const MAANDEN_LANG = ["Januari","Februari","Maart","April","Mei","Juni","Juli","Augustus","September","Oktober","November","December"];
+const MAANDEN = ["Jan", "Feb", "Mrt", "Apr", "Mei", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dec"];
+const MAANDEN_LANG = ["Januari", "Februari", "Maart", "April", "Mei", "Juni", "Juli", "Augustus", "September", "Oktober", "November", "December"];
 
-const fmt = (v, unit = "kWh") => v !== undefined && v !== null ? `${Number(v).toLocaleString("nl-NL", {minimumFractionDigits: 0, maximumFractionDigits: 1})} ${unit}` : "–";
-const fmtEur = (v) => v !== undefined && v !== null ? `€${Number(v).toLocaleString("nl-NL", {minimumFractionDigits: 2, maximumFractionDigits: 2})}` : "–";
+const fmt = (v, unit = "kWh") => v !== undefined && v !== null ? `${Number(v).toLocaleString("nl-NL", { minimumFractionDigits: 0, maximumFractionDigits: 1 })} ${unit}` : "–";
+const fmtEur = (v) => v !== undefined && v !== null ? `€${Number(v).toLocaleString("nl-NL", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "–";
 
 const inputStyle = { width: "100%", boxSizing: "border-box", background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8, padding: "10px 14px", color: "#e8f0fe", fontSize: 13, fontFamily: "inherit", outline: "none" };
 
@@ -29,6 +29,13 @@ export default function App() {
   const [csvError, setCsvError] = useState(null);
   const [csvImporting, setCsvImporting] = useState(false);
   const [liveData, setLiveData] = useState(null);
+  const [batterijData, setBatterijData] = useState(null);
+  const [batterijLoading, setBatterijLoading] = useState(false);
+  const [batterijError, setBatterijError] = useState(null);
+  const [batterijCap, setBatterijCap] = useState(10);
+  const [batterijPrijs, setBatterijPrijs] = useState(6000);
+  const [batterijInkoopTarief, setBatterijInkoopTarief] = useState(null);
+  const [batterijTerugleverTarief, setBatterijTerugleverTarief] = useState(null);
 
   useEffect(() => { loadAll(); loadSettings(); }, []);
 
@@ -40,12 +47,30 @@ export default function App() {
       try {
         const d = await fetch(`${API}/live`).then(r => r.json());
         if (!cancelled) setLiveData(d);
-      } catch(e) {}
+      } catch (e) { }
     }
     fetchLive();
     const interval = setInterval(fetchLive, 30_000);
     return () => { cancelled = true; clearInterval(interval); };
   }, [view]);
+
+  useEffect(() => {
+    if (view === "batterij" && !batterijData && !batterijLoading) loadBatterijData();
+  }, [view]);
+
+  async function loadBatterijData() {
+    setBatterijLoading(true);
+    setBatterijError(null);
+    try {
+      const d = await fetch(`${API}/batterij/analyse`).then(r => r.json());
+      if (d.error) throw new Error(d.error);
+      setBatterijData(d);
+      setBatterijCap(d.samenvatting.adviesCapaciteit || 10);
+      setBatterijInkoopTarief(d.samenvatting.gemInkoopTarief);
+      setBatterijTerugleverTarief(d.samenvatting.gemTerugleverTarief);
+    } catch (e) { setBatterijError(e.message); }
+    setBatterijLoading(false);
+  }
 
   async function loadAll() {
     const [dataRes, yearsRes] = await Promise.all([
@@ -89,12 +114,12 @@ export default function App() {
       await loadAll();
       setEditModal(null);
       notify("Opgeslagen!");
-    } catch(e) { notify("Fout bij opslaan", "error"); }
+    } catch (e) { notify("Fout bij opslaan", "error"); }
     setSaving(false);
   }
 
   async function deleteEntry(jaar, maand) {
-    if (!confirm(`Verwijder ${MAANDEN_LANG[maand-1]} ${jaar}?`)) return;
+    if (!confirm(`Verwijder ${MAANDEN_LANG[maand - 1]} ${jaar}?`)) return;
     await fetch(`${API}/data/${jaar}/${maand}`, { method: "DELETE" });
     await loadAll();
     notify("Verwijderd");
@@ -104,8 +129,8 @@ export default function App() {
     const lines = text.trim().split(/\r?\n/).filter(l => l.trim());
     if (lines.length < 2) throw new Error("CSV heeft minimaal een headerregel en één dataregel nodig.");
 
-    const REQUIRED = ["jaar","maand","verbruik","opgewekt","teruggeleverd","kosten"];
-    const OPTIONAL  = ["laadvergoeding","teruglevering_vergoeding"];
+    const REQUIRED = ["jaar", "maand", "verbruik", "opgewekt", "teruggeleverd", "kosten"];
+    const OPTIONAL = ["laadvergoeding", "teruglevering_vergoeding"];
 
     // Detect separator: semicolon or comma
     const sep = lines[0].includes(";") ? ";" : ",";
@@ -120,25 +145,25 @@ export default function App() {
       const row = {};
       headers.forEach((h, idx) => { row[h] = cols[idx] ?? ""; });
 
-      const jaar  = parseInt(row.jaar);
+      const jaar = parseInt(row.jaar);
       const maand = parseInt(row.maand);
       if (isNaN(jaar) || isNaN(maand) || maand < 1 || maand > 12)
-        throw new Error(`Regel ${i+1}: ongeldig jaar (${row.jaar}) of maand (${row.maand})`);
+        throw new Error(`Regel ${i + 1}: ongeldig jaar (${row.jaar}) of maand (${row.maand})`);
 
       const toNum = (k, required = true) => {
         const v = parseFloat(String(row[k] || "0").replace(",", "."));
-        if (required && isNaN(v)) throw new Error(`Regel ${i+1}: ongeldige waarde voor '${k}': ${row[k]}`);
+        if (required && isNaN(v)) throw new Error(`Regel ${i + 1}: ongeldige waarde voor '${k}': ${row[k]}`);
         return isNaN(v) ? 0 : v;
       };
 
       rows.push({
         jaar, maand,
-        verbruik:                toNum("verbruik"),
-        opgewekt:                toNum("opgewekt"),
-        teruggeleverd:           toNum("teruggeleverd"),
-        kosten:                  toNum("kosten"),
-        laadvergoeding:          toNum("laadvergoeding", false),
-        teruglevering_vergoeding:toNum("teruglevering_vergoeding", false),
+        verbruik: toNum("verbruik"),
+        opgewekt: toNum("opgewekt"),
+        teruggeleverd: toNum("teruggeleverd"),
+        kosten: toNum("kosten"),
+        laadvergoeding: toNum("laadvergoeding", false),
+        teruglevering_vergoeding: toNum("teruglevering_vergoeding", false),
       });
     }
     return rows;
@@ -153,7 +178,7 @@ export default function App() {
       try {
         const rows = parseCsv(e.target.result);
         setCsvPreview(rows);
-      } catch(err) {
+      } catch (err) {
         setCsvError(err.message);
       }
     };
@@ -177,7 +202,7 @@ export default function App() {
       setCsvModal(false);
       setCsvPreview(null);
       notify(`${ok} rijen geïmporteerd!`);
-    } catch(e) {
+    } catch (e) {
       setCsvError("Fout bij importeren: " + e.message);
     }
     setCsvImporting(false);
@@ -193,7 +218,7 @@ export default function App() {
       });
       await loadSettings();
       notify("Instellingen opgeslagen!");
-    } catch(e) { notify("Fout bij opslaan", "error"); }
+    } catch (e) { notify("Fout bij opslaan", "error"); }
     setSavingSettings(false);
   }
 
@@ -207,7 +232,7 @@ export default function App() {
       if (!result.errors || result.errors.length === 0) notify("Synchronisatie voltooid!");
       else if (result.tibber || result.goodwe) notify("Gedeeltelijk gesynchroniseerd", "warn");
       else notify("Synchronisatie mislukt – zie instellingen", "error");
-    } catch(e) { notify("Fout bij synchroniseren: " + e.message, "error"); }
+    } catch (e) { notify("Fout bij synchroniseren: " + e.message, "error"); }
     setSyncing(false);
   }
 
@@ -215,9 +240,9 @@ export default function App() {
   const compareData = compareYear ? (allData[compareYear] || []) : [];
 
   const chartData = MAANDEN.map((m, i) => {
-    const e = yearData.find(r => r.maand === i+1);
-    const c = compareData.find(r => r.maand === i+1);
-    const nettoKosten  = e ? (e.kosten - (e.laadvergoeding || 0) - (e.teruglevering_vergoeding || 0)) : null;
+    const e = yearData.find(r => r.maand === i + 1);
+    const c = compareData.find(r => r.maand === i + 1);
+    const nettoKosten = e ? (e.kosten - (e.laadvergoeding || 0) - (e.teruglevering_vergoeding || 0)) : null;
     const nettoKostenC = c ? (c.kosten - (c.laadvergoeding || 0) - (c.teruglevering_vergoeding || 0)) : null;
     return {
       maand: m,
@@ -244,7 +269,7 @@ export default function App() {
     teruglevering_vergoeding: acc.teruglevering_vergoeding + (r.teruglevering_vergoeding || 0),
   }), { verbruik: 0, opgewekt: 0, teruggeleverd: 0, kosten: 0, laadvergoeding: 0, teruglevering_vergoeding: 0 });
 
-  const totaleVergoeding  = totals.laadvergoeding + totals.teruglevering_vergoeding;
+  const totaleVergoeding = totals.laadvergoeding + totals.teruglevering_vergoeding;
   const nettoKostenTotaal = totals.kosten - totaleVergoeding;
   const hasLaadvergoeding = yearData.some(r => r.laadvergoeding > 0);
 
@@ -274,7 +299,7 @@ export default function App() {
             <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 20, letterSpacing: "-0.5px" }}>Energie Dashboard</div>
             <div style={{ fontSize: 11, color: "#607898", marginTop: 1 }}>Verbruik · Opwek · Kosten · Laadvergoeding</div>
           </div>
-          <div style={{ fontSize: 10, color: "#405060", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 6, padding: "3px 8px", fontFamily: "inherit", letterSpacing: "0.04em" }}>v1.4.0</div>
+          <div style={{ fontSize: 10, color: "#405060", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 6, padding: "3px 8px", fontFamily: "inherit", letterSpacing: "0.04em" }}>v1.4.1</div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           {canSync && (
@@ -283,7 +308,7 @@ export default function App() {
               {syncing ? "Synchroniseren..." : "Sync"}
             </button>
           )}
-          {[["dashboard","Dashboard"],["invoer","Invoer"],["vergelijk","Vergelijken"],["instellingen","⚙ Instellingen"]].map(([v,l]) => (
+          {[["dashboard", "Dashboard"], ["invoer", "Invoer"], ["vergelijk", "Vergelijken"], ["batterij", "🔋 Batterij"], ["instellingen", "⚙ Instellingen"]].map(([v, l]) => (
             <button key={v} onClick={() => setView(v)} style={{ padding: "8px 16px", borderRadius: 8, border: "none", cursor: "pointer", fontSize: 13, fontFamily: "inherit", fontWeight: 500, background: view === v ? "linear-gradient(135deg, #00d4a0, #0080ff)" : "rgba(255,255,255,0.07)", color: view === v ? "#000" : "#9ab", transition: "all 0.2s", position: "relative" }}>
               {l}
               {v === "instellingen" && !canSync && <span style={{ position: "absolute", top: 4, right: 4, width: 6, height: 6, borderRadius: "50%", background: "#f4a261" }} />}
@@ -322,7 +347,6 @@ export default function App() {
                 {[
                   { label: "Nu opgewekt", value: liveData.p_pv != null ? `${liveData.p_pv} W` : "–", color: "#00d4a0" },
                   { label: "Vandaag", value: liveData.e_day != null ? `${liveData.e_day.toFixed(1)} kWh` : "–", color: "#00d4a0" },
-                  { label: "Netstroom", value: liveData.p_grid != null ? `${liveData.p_grid > 0 ? "+" : ""}${liveData.p_grid} W` : "–", color: liveData.p_grid < 0 ? "#f4a261" : "#4488ff" },
                   { label: "Spanning", value: liveData.v_grid != null ? `${liveData.v_grid.toFixed(1)} V` : "–", color: "#9ab" },
                   { label: "Frequentie", value: liveData.f_grid != null ? `${liveData.f_grid.toFixed(2)} Hz` : "–", color: "#9ab" },
                   { label: "Temperatuur", value: liveData.temp != null ? `${liveData.temp.toFixed(1)} °C` : "–", color: liveData.temp > 60 ? "#e76f51" : "#9ab" },
@@ -338,13 +362,15 @@ export default function App() {
             <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 16, marginBottom: 16 }}>
               {[
                 { label: "Totaal verbruik", value: fmt(totals.verbruik), icon: "🔌", color: "#4488ff", sub: `${yearData.length} maanden` },
-                { label: "Totaal opgewekt", value: fmt(totals.opgewekt), icon: "☀️", color: "#00d4a0", sub: `${totals.opgewekt > 0 ? Math.round((totals.opgewekt/totals.verbruik)*100) : 0}% van verbruik` },
-                { label: "Teruggeleverd", value: fmt(totals.teruggeleverd), icon: "↩️", color: "#f4a261", sub: `${totals.opgewekt > 0 ? Math.round((totals.teruggeleverd/totals.opgewekt)*100) : 0}% van opwek` },
-                { label: "Zelfverbruik", value: fmt(Math.max(0, totals.opgewekt - totals.teruggeleverd)), icon: "🏠", color: "#818cf8",
+                { label: "Totaal opgewekt", value: fmt(totals.opgewekt), icon: "☀️", color: "#00d4a0", sub: `${totals.opgewekt > 0 ? Math.round((totals.opgewekt / totals.verbruik) * 100) : 0}% van verbruik` },
+                { label: "Teruggeleverd", value: fmt(totals.teruggeleverd), icon: "↩️", color: "#f4a261", sub: `${totals.opgewekt > 0 ? Math.round((totals.teruggeleverd / totals.opgewekt) * 100) : 0}% van opwek` },
+                {
+                  label: "Zelfverbruik", value: fmt(Math.max(0, totals.opgewekt - totals.teruggeleverd)), icon: "🏠", color: "#818cf8",
                   sub: totals.opgewekt > 0
                     ? `${Math.round((Math.max(0, totals.opgewekt - totals.teruggeleverd) / totals.opgewekt) * 100)}% van opwek`
-                    : "Nog geen opwekdata" },
-                { label: "Bruto kosten", value: fmtEur(totals.kosten), icon: "💶", color: "#e76f51", sub: yearData.length > 0 ? `Ø ${fmtEur(totals.kosten/yearData.length)}/mnd` : "–" },
+                    : "Nog geen opwekdata"
+                },
+                { label: "Bruto kosten", value: fmtEur(totals.kosten), icon: "💶", color: "#e76f51", sub: yearData.length > 0 ? `Ø ${fmtEur(totals.kosten / yearData.length)}/mnd` : "–" },
               ].map(card => (
                 <KpiCard key={card.label} {...card} />
               ))}
@@ -353,13 +379,13 @@ export default function App() {
             {/* KPI row 2: vergoedingen + netto */}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, marginBottom: 28 }}>
               <KpiCard label="Laadvergoeding EV (Eneco)" value={fmtEur(totals.laadvergoeding)} icon="🚗" color="#a78bfa"
-                sub={totals.laadvergoeding > 0 ? `Ø ${fmtEur(totals.laadvergoeding / yearData.filter(r=>r.laadvergoeding>0).length)}/mnd` : "Nog geen data"} />
+                sub={totals.laadvergoeding > 0 ? `Ø ${fmtEur(totals.laadvergoeding / yearData.filter(r => r.laadvergoeding > 0).length)}/mnd` : "Nog geen data"} />
               <KpiCard label="Teruglevering vergoeding (Tibber)" value={fmtEur(totals.teruglevering_vergoeding)} icon="↩💶" color="#34d399"
-                sub={totals.teruglevering_vergoeding > 0 ? `Ø ${fmtEur(totals.teruglevering_vergoeding / yearData.filter(r=>r.teruglevering_vergoeding>0).length)}/mnd` : "Nog geen data"} />
+                sub={totals.teruglevering_vergoeding > 0 ? `Ø ${fmtEur(totals.teruglevering_vergoeding / yearData.filter(r => r.teruglevering_vergoeding > 0).length)}/mnd` : "Nog geen data"} />
               <KpiCard label="Totale vergoedingen" value={fmtEur(totaleVergoeding)} icon="📊" color="#fbbf24"
                 sub={`EV + teruglevering samen`} />
               <KpiCard label="Netto kosten" value={fmtEur(nettoKostenTotaal)} icon="✅" color="#00d4a0"
-                sub={totaleVergoeding > 0 ? `${Math.round((totaleVergoeding/totals.kosten)*100)}% terugontvangen` : "Voer vergoedingen in"} accent />
+                sub={totaleVergoeding > 0 ? `${Math.round((totaleVergoeding / totals.kosten) * 100)}% terugontvangen` : "Voer vergoedingen in"} accent />
             </div>
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }}>
@@ -367,8 +393,8 @@ export default function App() {
                 <ResponsiveContainer width="100%" height={240}>
                   <AreaChart data={chartData}>
                     <defs>
-                      <linearGradient id="gV" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#4488ff" stopOpacity={0.3}/><stop offset="95%" stopColor="#4488ff" stopOpacity={0}/></linearGradient>
-                      <linearGradient id="gO" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#00d4a0" stopOpacity={0.3}/><stop offset="95%" stopColor="#00d4a0" stopOpacity={0}/></linearGradient>
+                      <linearGradient id="gV" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#4488ff" stopOpacity={0.3} /><stop offset="95%" stopColor="#4488ff" stopOpacity={0} /></linearGradient>
+                      <linearGradient id="gO" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#00d4a0" stopOpacity={0.3} /><stop offset="95%" stopColor="#00d4a0" stopOpacity={0} /></linearGradient>
                     </defs>
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
                     <XAxis dataKey="maand" tick={{ fill: "#607898", fontSize: 11 }} />
@@ -389,8 +415,8 @@ export default function App() {
                     <YAxis tick={{ fill: "#607898", fontSize: 11 }} />
                     <Tooltip contentStyle={{ background: "#0d1929", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8 }} formatter={(v) => [fmtEur(v), ""]} />
                     <Legend wrapperStyle={{ fontSize: 12 }} />
-                    <Bar dataKey="kosten" fill="#e76f51" name="Bruto kosten" radius={[4,4,0,0]} />
-                    <Bar dataKey="nettoKosten" fill="#00d4a0" name="Netto kosten" radius={[4,4,0,0]} />
+                    <Bar dataKey="kosten" fill="#e76f51" name="Bruto kosten" radius={[4, 4, 0, 0]} />
+                    <Bar dataKey="nettoKosten" fill="#00d4a0" name="Netto kosten" radius={[4, 4, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
               </ChartCard>
@@ -404,7 +430,7 @@ export default function App() {
                     <XAxis dataKey="maand" tick={{ fill: "#607898", fontSize: 11 }} />
                     <YAxis tick={{ fill: "#607898", fontSize: 11 }} />
                     <Tooltip contentStyle={{ background: "#0d1929", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8 }} formatter={(v) => [fmt(v), ""]} />
-                    <Bar dataKey="teruggeleverd" fill="#f4a261" name="Teruggeleverd" radius={[4,4,0,0]} />
+                    <Bar dataKey="teruggeleverd" fill="#f4a261" name="Teruggeleverd" radius={[4, 4, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
               </ChartCard>
@@ -416,7 +442,7 @@ export default function App() {
                     <XAxis dataKey="maand" tick={{ fill: "#607898", fontSize: 11 }} />
                     <YAxis tick={{ fill: "#607898", fontSize: 11 }} />
                     <Tooltip contentStyle={{ background: "#0d1929", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8 }} formatter={(v) => [fmtEur(v), ""]} />
-                    <Bar dataKey="laadvergoeding" fill="#a78bfa" name="Laadvergoeding" radius={[4,4,0,0]} />
+                    <Bar dataKey="laadvergoeding" fill="#a78bfa" name="Laadvergoeding" radius={[4, 4, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
               </ChartCard>
@@ -432,7 +458,7 @@ export default function App() {
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                 <button onClick={() => { setCsvModal(true); setCsvPreview(null); setCsvError(null); }} style={{ padding: "6px 14px", borderRadius: 6, border: "1px solid rgba(0,212,160,0.3)", cursor: "pointer", fontSize: 12, fontFamily: "inherit", background: "rgba(0,212,160,0.08)", color: "#00d4a0" }}>⬆ CSV importeren</button>
                 <span style={{ color: "#607898", fontSize: 12 }}>Jaar toevoegen:</span>
-                {allYearsForInput.filter(y => !years.includes(y)).slice(0,5).map(y => (
+                {allYearsForInput.filter(y => !years.includes(y)).slice(0, 5).map(y => (
                   <button key={y} onClick={() => { openEdit(y, 1); setSelectedYear(y); }} style={{ padding: "5px 12px", borderRadius: 6, border: "1px solid rgba(255,255,255,0.15)", cursor: "pointer", fontSize: 12, fontFamily: "inherit", background: "transparent", color: "#9ab" }}>{y}</button>
                 ))}
               </div>
@@ -441,39 +467,64 @@ export default function App() {
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
                 <thead>
                   <tr style={{ background: "rgba(255,255,255,0.05)" }}>
-                    {["Maand","Verbruik (kWh)","Opgewekt (kWh)","Teruggelev. (kWh)","Kosten (€)","Laadverg. EV (€)","Teruglev. verg. (€)","Netto (€)",""].map(h => (
+                    {["Maand", "Verbruik (kWh)", "Opgewekt (kWh)", "Teruggelev. (kWh)", "Kosten (€)", "Laadverg. EV (€)", "Teruglev. verg. (€)", "Netto (€)", ""].map(h => (
                       <th key={h} style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, color: h === "Laadverg. EV (€)" ? "#a78bfa" : h === "Teruglev. verg. (€)" ? "#34d399" : "#607898", fontWeight: 500, letterSpacing: "0.04em", textTransform: "uppercase", whiteSpace: "nowrap" }}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
                   {MAANDEN_LANG.map((naam, i) => {
-                    const entry = yearData.find(r => r.maand === i+1);
+                    const entry = yearData.find(r => r.maand === i + 1);
                     const netto = entry ? (entry.kosten - (entry.laadvergoeding || 0) - (entry.teruglevering_vergoeding || 0)) : null;
                     return (
-                      <tr key={i} style={{ borderTop: "1px solid rgba(255,255,255,0.05)" }} onMouseEnter={e => e.currentTarget.style.background="rgba(255,255,255,0.03)"} onMouseLeave={e => e.currentTarget.style.background="transparent"}>
+                      <tr key={i} style={{ borderTop: "1px solid rgba(255,255,255,0.05)" }} onMouseEnter={e => e.currentTarget.style.background = "rgba(255,255,255,0.03)"} onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
                         <td style={{ padding: "11px 14px", fontWeight: 500, color: entry ? "#e8f0fe" : "#405060" }}>{naam}</td>
                         <td style={{ padding: "11px 14px", color: entry ? "#4488ff" : "#405060" }}>{entry ? fmt(entry.verbruik) : "–"}</td>
                         <td style={{ padding: "11px 14px", color: entry ? "#00d4a0" : "#405060" }}>{entry ? fmt(entry.opgewekt) : "–"}</td>
                         <td style={{ padding: "11px 14px", color: entry ? "#f4a261" : "#405060" }}>{entry ? fmt(entry.teruggeleverd) : "–"}</td>
                         <td style={{ padding: "11px 14px", color: entry ? "#e76f51" : "#405060" }}>{entry ? fmtEur(entry.kosten) : "–"}</td>
                         <td style={{ padding: "11px 14px", color: entry?.laadvergoeding > 0 ? "#a78bfa" : "#405060" }}>
-                          {entry ? (entry.laadvergoeding > 0 ? fmtEur(entry.laadvergoeding) : <span style={{color:"#405060",fontSize:11}}>–</span>) : "–"}
+                          {entry ? (entry.laadvergoeding > 0 ? fmtEur(entry.laadvergoeding) : <span style={{ color: "#405060", fontSize: 11 }}>–</span>) : "–"}
                         </td>
                         <td style={{ padding: "11px 14px", color: entry?.teruglevering_vergoeding > 0 ? "#34d399" : "#405060" }}>
-                          {entry ? (entry.teruglevering_vergoeding > 0 ? fmtEur(entry.teruglevering_vergoeding) : <span style={{color:"#405060",fontSize:11}}>–</span>) : "–"}
+                          {entry ? (entry.teruglevering_vergoeding > 0 ? fmtEur(entry.teruglevering_vergoeding) : <span style={{ color: "#405060", fontSize: 11 }}>–</span>) : "–"}
                         </td>
                         <td style={{ padding: "11px 14px", color: netto !== null ? (netto < entry.kosten ? "#00d4a0" : "#e76f51") : "#405060", fontWeight: netto !== null ? 600 : 400 }}>
                           {netto !== null ? fmtEur(netto) : "–"}
                         </td>
                         <td style={{ padding: "11px 14px", display: "flex", gap: 6 }}>
-                          <button onClick={() => openEdit(selectedYear, i+1)} style={{ padding: "5px 12px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 12, fontFamily: "inherit", background: "rgba(0,212,160,0.15)", color: "#00d4a0", whiteSpace: "nowrap" }}>{entry ? "Bewerken" : "+ Invoeren"}</button>
-                          {entry && <button onClick={() => deleteEntry(selectedYear, i+1)} style={{ padding: "5px 10px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 12, fontFamily: "inherit", background: "rgba(231,111,81,0.15)", color: "#e76f51" }}>✕</button>}
+                          <button onClick={() => openEdit(selectedYear, i + 1)} style={{ padding: "5px 12px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 12, fontFamily: "inherit", background: "rgba(0,212,160,0.15)", color: "#00d4a0", whiteSpace: "nowrap" }}>{entry ? "Bewerken" : "+ Invoeren"}</button>
+                          {entry && <button onClick={() => deleteEntry(selectedYear, i + 1)} style={{ padding: "5px 10px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 12, fontFamily: "inherit", background: "rgba(231,111,81,0.15)", color: "#e76f51" }}>✕</button>}
                         </td>
                       </tr>
                     );
                   })}
                 </tbody>
+                <tfoot>
+                  {(() => {
+                    const totVerbruik = yearData.reduce((s, r) => s + (r.verbruik || 0), 0);
+                    const totOpgewekt = yearData.reduce((s, r) => s + (r.opgewekt || 0), 0);
+                    const totTeruggeleverd = yearData.reduce((s, r) => s + (r.teruggeleverd || 0), 0);
+                    const totKosten = yearData.reduce((s, r) => s + (r.kosten || 0), 0);
+                    const totLaadvergoeding = yearData.reduce((s, r) => s + (r.laadvergoeding || 0), 0);
+                    const totTeruglevering = yearData.reduce((s, r) => s + (r.teruglevering_vergoeding || 0), 0);
+                    const totNetto = totKosten - totLaadvergoeding - totTeruglevering;
+                    const hasData = yearData.length > 0;
+                    return (
+                      <tr style={{ borderTop: "2px solid rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.04)" }}>
+                        <td style={{ padding: "11px 14px", fontWeight: 700, color: "#e8f0fe", fontSize: 12, textTransform: "uppercase", letterSpacing: "0.04em" }}>Totaal</td>
+                        <td style={{ padding: "11px 14px", color: hasData ? "#4488ff" : "#405060", fontWeight: 600 }}>{hasData ? fmt(totVerbruik) : "–"}</td>
+                        <td style={{ padding: "11px 14px", color: hasData ? "#00d4a0" : "#405060", fontWeight: 600 }}>{hasData ? fmt(totOpgewekt) : "–"}</td>
+                        <td style={{ padding: "11px 14px", color: hasData ? "#f4a261" : "#405060", fontWeight: 600 }}>{hasData ? fmt(totTeruggeleverd) : "–"}</td>
+                        <td style={{ padding: "11px 14px", color: hasData ? "#e76f51" : "#405060", fontWeight: 600 }}>{hasData ? fmtEur(totKosten) : "–"}</td>
+                        <td style={{ padding: "11px 14px", color: hasData && totLaadvergoeding > 0 ? "#a78bfa" : "#405060", fontWeight: 600 }}>{hasData && totLaadvergoeding > 0 ? fmtEur(totLaadvergoeding) : "–"}</td>
+                        <td style={{ padding: "11px 14px", color: hasData && totTeruglevering > 0 ? "#34d399" : "#405060", fontWeight: 600 }}>{hasData && totTeruglevering > 0 ? fmtEur(totTeruglevering) : "–"}</td>
+                        <td style={{ padding: "11px 14px", color: hasData ? (totNetto < totKosten ? "#00d4a0" : "#e76f51") : "#405060", fontWeight: 700 }}>{hasData ? fmtEur(totNetto) : "–"}</td>
+                        <td style={{ padding: "11px 14px" }}></td>
+                      </tr>
+                    );
+                  })()}
+                </tfoot>
               </table>
             </div>
           </div>
@@ -496,17 +547,17 @@ export default function App() {
               <>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 14, marginBottom: 24 }}>
                   {[
-                    ["verbruik","Verbruik","#4488ff",false],
-                    ["opgewekt","Opgewekt","#00d4a0",false],
-                    ["teruggeleverd","Teruggelev.","#f4a261",false],
-                    ["kosten","Bruto kosten","#e76f51",true],
-                    ["laadvergoeding","Laadverg. EV","#a78bfa",true],
-                    ["teruglevering_vergoeding","Teruglev. verg.","#34d399",true],
+                    ["verbruik", "Verbruik", "#4488ff", false],
+                    ["opgewekt", "Opgewekt", "#00d4a0", false],
+                    ["teruggeleverd", "Teruggelev.", "#f4a261", false],
+                    ["kosten", "Bruto kosten", "#e76f51", true],
+                    ["laadvergoeding", "Laadverg. EV", "#a78bfa", true],
+                    ["teruglevering_vergoeding", "Teruglev. verg.", "#34d399", true],
                   ].map(([key, label, color, isEur]) => {
-                    const v1 = yearData.reduce((s,r) => s+(r[key]||0),0);
-                    const v2 = compareData.reduce((s,r) => s+(r[key]||0),0);
+                    const v1 = yearData.reduce((s, r) => s + (r[key] || 0), 0);
+                    const v2 = compareData.reduce((s, r) => s + (r[key] || 0), 0);
                     const diff = v1 - v2;
-                    const pct = v2 > 0 ? Math.round((diff/v2)*100) : null;
+                    const pct = v2 > 0 ? Math.round((diff / v2) * 100) : null;
                     return (
                       <div key={key} style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 12, padding: "16px 18px" }}>
                         <div style={{ fontSize: 10, color: "#607898", textTransform: "capitalize", marginBottom: 8 }}>{label}</div>
@@ -539,8 +590,8 @@ export default function App() {
                         <YAxis tick={{ fill: "#607898", fontSize: 11 }} />
                         <Tooltip contentStyle={{ background: "#0d1929", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8 }} formatter={(v) => [fmtEur(v), ""]} />
                         <Legend wrapperStyle={{ fontSize: 12 }} />
-                        <Bar dataKey="nettoKosten" fill="#00d4a0" name={`${selectedYear}`} radius={[4,4,0,0]} />
-                        <Bar dataKey={`nettoKosten_${compareYear}`} fill="#007755" name={`${compareYear}`} radius={[4,4,0,0]} />
+                        <Bar dataKey="nettoKosten" fill="#00d4a0" name={`${selectedYear}`} radius={[4, 4, 0, 0]} />
+                        <Bar dataKey={`nettoKosten_${compareYear}`} fill="#007755" name={`${compareYear}`} radius={[4, 4, 0, 0]} />
                       </BarChart>
                     </ResponsiveContainer>
                   </ChartCard>
@@ -565,8 +616,8 @@ export default function App() {
                         <YAxis tick={{ fill: "#607898", fontSize: 11 }} />
                         <Tooltip contentStyle={{ background: "#0d1929", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8 }} formatter={(v) => [fmtEur(v), ""]} />
                         <Legend wrapperStyle={{ fontSize: 12 }} />
-                        <Bar dataKey="kosten" fill="#e76f51" name={`${selectedYear}`} radius={[4,4,0,0]} />
-                        <Bar dataKey={`kosten_${compareYear}`} fill="#9a3a22" name={`${compareYear}`} radius={[4,4,0,0]} />
+                        <Bar dataKey="kosten" fill="#e76f51" name={`${selectedYear}`} radius={[4, 4, 0, 0]} />
+                        <Bar dataKey={`kosten_${compareYear}`} fill="#9a3a22" name={`${compareYear}`} radius={[4, 4, 0, 0]} />
                       </BarChart>
                     </ResponsiveContainer>
                   </ChartCard>
@@ -574,6 +625,195 @@ export default function App() {
               </>
             )}
             {!compareYear && years.length >= 2 && <div style={{ textAlign: "center", color: "#607898", padding: "60px 0", fontSize: 15 }}>Selecteer een vergelijkjaar hierboven</div>}
+          </div>
+        )}
+
+        {/* ===== BATTERIJ SIMULATOR ===== */}
+        {view === "batterij" && (
+          <div style={{ maxWidth: 900 }}>
+            <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 600, fontSize: 20, margin: "0 0 4px" }}>🔋 Batterij Simulator</h2>
+            <p style={{ color: "#607898", fontSize: 13, marginBottom: 24, lineHeight: 1.6 }}>Berekend op basis van jouw werkelijke historische energiedata.</p>
+
+            {batterijLoading && <div style={{ textAlign: "center", padding: "60px 0", color: "#607898" }}>Analyse bezig...</div>}
+            {batterijError && (
+              <div style={{ background: "rgba(255,100,100,0.1)", border: "1px solid rgba(255,100,100,0.3)", borderRadius: 12, padding: "20px 24px", color: "#ff8080" }}>
+                <strong>Fout:</strong> {batterijError}<br />
+                <span style={{ fontSize: 12, color: "#607898" }}>Zorg dat er minimaal 6 maanden data aanwezig is.</span>
+              </div>
+            )}
+
+            {batterijData && (() => {
+              const s = batterijData.samenvatting;
+
+              // Gebruik overschreven tarieven als de gebruiker ze heeft aangepast
+              const inkoopTarief = batterijInkoopTarief ?? s.gemInkoopTarief;
+              const terugleverTarief = batterijTerugleverTarief ?? s.gemTerugleverTarief;
+              const besparingPerKwh = Math.max(0.01, inkoopTarief - terugleverTarief);
+
+              // Herbereken jaarlijkse besparing voor gekozen capaciteit met evt. aangepaste tarieven
+              const roundTripEff = 0.92;
+              let jaarBesparing = 0;
+              for (const m of batterijData.maandData) {
+                const dagen = new Date(m.jaar, m.maand, 0).getDate();
+                const dagTL = m.teruggeleverd / dagen;
+                const opgeslagen = Math.min(dagTL, batterijCap) * roundTripEff;
+                jaarBesparing += opgeslagen * dagen * besparingPerKwh;
+              }
+              const jaarFactor = 12 / s.aantalMaanden;
+              jaarBesparing = jaarBesparing * jaarFactor;
+
+              const tvt = batterijPrijs > 0 && jaarBesparing > 0 ? batterijPrijs / jaarBesparing : null;
+
+              // Grafiekdata: teruggeleverd per maand
+              const maandGrafiek = batterijData.maandData.map(m => ({
+                naam: ["Jan", "Feb", "Mrt", "Apr", "Mei", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dec"][m.maand - 1] + " " + m.jaar,
+                teruggeleverd: Math.round(m.teruggeleverd * 10) / 10,
+                opgeslagen: Math.round(Math.min(m.teruggeleverd, batterijCap * 30.5) * roundTripEff * 10) / 10,
+              }));
+
+              // Capaciteit vs terugverdientijd grafiek
+              const capGrafiek = batterijData.capaciteitAnalyse.filter(c => c.cap % 1 === 0 || c.cap === batterijCap).map(c => {
+                const herberekend = c.jaarBesparing * (besparingPerKwh / s.besparingPerKwh);
+                const tvtJaar = batterijPrijs > 0 && herberekend > 0 ? Math.round(batterijPrijs / herberekend * 10) / 10 : null;
+                return { cap: c.cap + " kWh", besparing: Math.round(herberekend), tvt: tvtJaar };
+              });
+
+              const kpiStyle = { background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 14, padding: "18px 20px", flex: 1, minWidth: 140 };
+              const labelStyle = { fontSize: 11, color: "#607898", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 };
+              const valStyle = { fontSize: 24, fontWeight: 700, fontFamily: "'Space Grotesk', sans-serif" };
+
+              return (
+                <>
+                  {/* KPI rij */}
+                  <div style={{ display: "flex", gap: 14, marginBottom: 24, flexWrap: "wrap" }}>
+                    <div style={kpiStyle}>
+                      <div style={labelStyle}>Gem. teruglevering/dag</div>
+                      <div style={valStyle}>{s.gemTerugPerDag} <span style={{ fontSize: 14, color: "#607898" }}>kWh</span></div>
+                    </div>
+                    <div style={kpiStyle}>
+                      <div style={labelStyle}>Zomer gem./maand</div>
+                      <div style={{ ...valStyle, color: "#00d4a0" }}>{s.gemTerugZomer} <span style={{ fontSize: 14, color: "#607898" }}>kWh</span></div>
+                    </div>
+                    <div style={kpiStyle}>
+                      <div style={labelStyle}>Winter gem./maand</div>
+                      <div style={{ ...valStyle, color: "#4488ff" }}>{s.gemTerugWinter} <span style={{ fontSize: 14, color: "#607898" }}>kWh</span></div>
+                    </div>
+                    <div style={kpiStyle}>
+                      <div style={labelStyle}>Advies capaciteit</div>
+                      <div style={{ ...valStyle, color: "#f4a261" }}>{s.adviesCapaciteit} <span style={{ fontSize: 14, color: "#607898" }}>kWh</span></div>
+                    </div>
+                  </div>
+
+                  {/* Tarieven aanpassen */}
+                  <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 14, padding: "20px 24px", marginBottom: 20 }}>
+                    <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 600, fontSize: 15, marginBottom: 16 }}>⚡ Tarieven</div>
+                    <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
+                      <div style={{ flex: 1, minWidth: 180 }}>
+                        <label style={{ ...labelStyle, display: "block", marginBottom: 6 }}>Inkooptarief (€/kWh) — uit Tibber: €{s.gemInkoopTarief.toFixed(3)}</label>
+                        <input type="number" step="0.001" min="0.10" max="0.60" value={batterijInkoopTarief ?? s.gemInkoopTarief}
+                          onChange={e => setBatterijInkoopTarief(parseFloat(e.target.value) || s.gemInkoopTarief)}
+                          style={{ ...inputStyle, width: 120 }} />
+                      </div>
+                      <div style={{ flex: 1, minWidth: 180 }}>
+                        <label style={{ ...labelStyle, display: "block", marginBottom: 6 }}>Teruglevertarief (€/kWh) — uit Tibber: €{s.gemTerugleverTarief.toFixed(3)}</label>
+                        <input type="number" step="0.001" min="0.00" max="0.30" value={batterijTerugleverTarief ?? s.gemTerugleverTarief}
+                          onChange={e => setBatterijTerugleverTarief(parseFloat(e.target.value) || s.gemTerugleverTarief)}
+                          style={{ ...inputStyle, width: 120 }} />
+                      </div>
+                      <div style={{ flex: 1, minWidth: 180 }}>
+                        <label style={{ ...labelStyle, display: "block", marginBottom: 6 }}>Besparing per kWh</label>
+                        <div style={{ fontSize: 20, fontWeight: 700, color: "#00d4a0", paddingTop: 8 }}>€{besparingPerKwh.toFixed(3)}</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Simulator sliders */}
+                  <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 14, padding: "20px 24px", marginBottom: 20 }}>
+                    <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 600, fontSize: 15, marginBottom: 20 }}>🎛 Simulator</div>
+                    <div style={{ display: "flex", gap: 32, flexWrap: "wrap" }}>
+                      <div style={{ flex: 1, minWidth: 220 }}>
+                        <label style={{ ...labelStyle, display: "block", marginBottom: 8 }}>Batterijcapaciteit: <strong style={{ color: "#fff" }}>{batterijCap} kWh</strong></label>
+                        <input type="range" min="3" max="20" step="0.5" value={batterijCap}
+                          onChange={e => setBatterijCap(parseFloat(e.target.value))}
+                          style={{ width: "100%", accentColor: "#00d4a0" }} />
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#607898", marginTop: 4 }}>
+                          <span>3 kWh</span><span style={{ color: "#f4a261" }}>Advies: {s.adviesCapaciteit} kWh</span><span>20 kWh</span>
+                        </div>
+                      </div>
+                      <div style={{ flex: 1, minWidth: 220 }}>
+                        <label style={{ ...labelStyle, display: "block", marginBottom: 8 }}>Aanschafprijs incl. installatie: <strong style={{ color: "#fff" }}>€{batterijPrijs.toLocaleString("nl-NL")}</strong></label>
+                        <input type="range" min="2000" max="20000" step="500" value={batterijPrijs}
+                          onChange={e => setBatterijPrijs(parseInt(e.target.value))}
+                          style={{ width: "100%", accentColor: "#4488ff" }} />
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#607898", marginTop: 4 }}>
+                          <span>€2.000</span><span>€20.000</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Resultaat */}
+                    <div style={{ display: "flex", gap: 16, marginTop: 24, flexWrap: "wrap" }}>
+                      <div style={{ flex: 1, minWidth: 160, background: "rgba(0,212,160,0.08)", border: "1px solid rgba(0,212,160,0.25)", borderRadius: 12, padding: "16px 20px" }}>
+                        <div style={{ fontSize: 11, color: "#607898", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>Jaarlijkse besparing</div>
+                        <div style={{ fontSize: 28, fontWeight: 700, fontFamily: "'Space Grotesk', sans-serif", color: "#00d4a0" }}>€{Math.round(jaarBesparing).toLocaleString("nl-NL")}</div>
+                        <div style={{ fontSize: 11, color: "#607898", marginTop: 4 }}>per jaar</div>
+                      </div>
+                      <div style={{ flex: 1, minWidth: 160, background: tvt && tvt <= 15 ? "rgba(68,136,255,0.08)" : "rgba(255,100,100,0.08)", border: `1px solid ${tvt && tvt <= 15 ? "rgba(68,136,255,0.25)" : "rgba(255,100,100,0.25)"}`, borderRadius: 12, padding: "16px 20px" }}>
+                        <div style={{ fontSize: 11, color: "#607898", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>Terugverdientijd</div>
+                        <div style={{ fontSize: 28, fontWeight: 700, fontFamily: "'Space Grotesk', sans-serif", color: tvt && tvt <= 15 ? "#4488ff" : "#ff8080" }}>
+                          {tvt ? `${Math.round(tvt * 10) / 10} jr` : "–"}
+                        </div>
+                        <div style={{ fontSize: 11, color: "#607898", marginTop: 4 }}>{tvt && tvt <= 10 ? "✅ Gunstig" : tvt && tvt <= 15 ? "⚠️ Acceptabel" : tvt ? "❌ Lang" : ""}</div>
+                      </div>
+                      <div style={{ flex: 1, minWidth: 160, background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 12, padding: "16px 20px" }}>
+                        <div style={{ fontSize: 11, color: "#607898", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>Besparing na 15 jaar</div>
+                        <div style={{ fontSize: 28, fontWeight: 700, fontFamily: "'Space Grotesk', sans-serif", color: jaarBesparing * 15 > batterijPrijs ? "#00d4a0" : "#f4a261" }}>
+                          €{Math.round(jaarBesparing * 15 - batterijPrijs).toLocaleString("nl-NL")}
+                        </div>
+                        <div style={{ fontSize: 11, color: "#607898", marginTop: 4 }}>netto na aftrek aanschaf</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Grafiek: teruggeleverd vs opgeslagen */}
+                  <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 14, padding: "20px 20px 12px", marginBottom: 20 }}>
+                    <div style={{ fontSize: 12, color: "#607898", marginBottom: 16, fontWeight: 500, letterSpacing: "0.04em", textTransform: "uppercase" }}>Teruggeleverd vs opgeslagen per maand</div>
+                    <ResponsiveContainer width="100%" height={220}>
+                      <BarChart data={maandGrafiek} margin={{ top: 4, right: 8, left: 0, bottom: 40 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                        <XAxis dataKey="naam" tick={{ fill: "#607898", fontSize: 10 }} angle={-45} textAnchor="end" interval={0} />
+                        <YAxis tick={{ fill: "#607898", fontSize: 11 }} unit=" kWh" />
+                        <Tooltip contentStyle={{ background: "#0d1b2a", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} labelStyle={{ color: "#e8f0fe" }} />
+                        <Legend wrapperStyle={{ paddingTop: 8, fontSize: 12, color: "#9ab" }} />
+                        <Bar dataKey="teruggeleverd" name="Teruggeleverd" fill="#4488ff" opacity={0.6} radius={[3, 3, 0, 0]} />
+                        <Bar dataKey="opgeslagen" name={`Opgeslagen (${batterijCap} kWh)`} fill="#00d4a0" radius={[3, 3, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+
+                  {/* Grafiek: capaciteit vs terugverdientijd */}
+                  <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 14, padding: "20px 20px 12px", marginBottom: 20 }}>
+                    <div style={{ fontSize: 12, color: "#607898", marginBottom: 16, fontWeight: 500, letterSpacing: "0.04em", textTransform: "uppercase" }}>Jaarlijkse besparing per capaciteit (bij €{batterijPrijs.toLocaleString("nl-NL")} aanschaf)</div>
+                    <ResponsiveContainer width="100%" height={220}>
+                      <BarChart data={capGrafiek} margin={{ top: 4, right: 8, left: 0, bottom: 20 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                        <XAxis dataKey="cap" tick={{ fill: "#607898", fontSize: 11 }} />
+                        <YAxis tick={{ fill: "#607898", fontSize: 11 }} unit=" €" />
+                        <Tooltip contentStyle={{ background: "#0d1b2a", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} labelStyle={{ color: "#e8f0fe" }}
+                          formatter={(val, name, props) => [`€${val}/jr — TVT: ${props.payload.tvt} jr`, "Besparing"]} />
+                        <Bar dataKey="besparing" name="Jaarlijkse besparing" radius={[4, 4, 0, 0]}
+                          fill="#4488ff"
+                          label={{ position: "top", fill: "#607898", fontSize: 9, formatter: v => `€${v}` }} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+
+                  <div style={{ background: "rgba(255,200,0,0.06)", border: "1px solid rgba(255,200,0,0.15)", borderRadius: 12, padding: "14px 18px", fontSize: 12, color: "#b0a070", lineHeight: 1.7 }}>
+                    <strong style={{ color: "#f4a261" }}>💡 Aannames in deze berekening:</strong> Round-trip rendement 92% · Data gebaseerd op {s.aantalMaanden} maanden · Tarieven automatisch berekend uit Tibber-data · Geen rekening gehouden met degradatie batterij of toekomstige tariefwijzigingen · Zelfverbruik overdag niet meegenomen (batterij is aanvulling)
+                  </div>
+                </>
+              );
+            })()}
           </div>
         )}
 
@@ -585,38 +825,38 @@ export default function App() {
 
             <Section title="Tibber" icon="⚡" badge={hasTibber ? "✓ Gekoppeld" : "Niet gekoppeld"} badgeOk={hasTibber}>
               <p style={{ color: "#607898", fontSize: 12, marginBottom: 16, lineHeight: 1.7 }}>
-                Levert <strong style={{color:"#9ab"}}>verbruik (kWh), teruggeleverd (kWh) en kosten (€)</strong> per maand.<br/>
+                Levert <strong style={{ color: "#9ab" }}>verbruik (kWh), teruggeleverd (kWh) en kosten (€)</strong> per maand.<br />
                 Token ophalen via <a href="https://developer.tibber.com/explorer" target="_blank" rel="noreferrer" style={{ color: "#4488ff" }}>developer.tibber.com</a> → "Load personal token".
               </p>
               <Field label="Persoonlijk API Token">
-                <input type="password" placeholder="Plak hier je Tibber token..." value={settings.tibber_token} onChange={e => setSettings(s => ({...s, tibber_token: e.target.value}))} style={inputStyle} />
+                <input type="password" placeholder="Plak hier je Tibber token..." value={settings.tibber_token} onChange={e => setSettings(s => ({ ...s, tibber_token: e.target.value }))} style={inputStyle} />
               </Field>
             </Section>
 
             <Section title="GoodWe SEMSPlus" icon="☀️" badge={hasGoodwe ? "✓ Gekoppeld" : "Niet gekoppeld"} badgeOk={hasGoodwe}>
               <p style={{ color: "#607898", fontSize: 12, marginBottom: 16, lineHeight: 1.7 }}>
-                Levert <strong style={{color:"#9ab"}}>opgewekt (kWh)</strong> per maand. Teruggeleverd wordt via Tibber opgehaald.<br/>
-                De app logt in via <code style={{fontSize:11}}>eu.semsportal.com/api/v2</code> (primair, geen x-signature),
-                met automatische terugval op oudere portals.<br/><br/>
-                <strong style={{color:"#9ab"}}>Station ID vinden in SEMSPlus:</strong> Log in → klik op je installatie → kopieer het ID uit de URL:<br/>
+                Levert <strong style={{ color: "#9ab" }}>opgewekt (kWh)</strong> per maand. Teruggeleverd wordt via Tibber opgehaald.<br />
+                De app logt in via <code style={{ fontSize: 11 }}>eu.semsportal.com/api/v2</code> (primair, geen x-signature),
+                met automatische terugval op oudere portals.<br /><br />
+                <strong style={{ color: "#9ab" }}>Station ID vinden in SEMSPlus:</strong> Log in → klik op je installatie → kopieer het ID uit de URL:<br />
                 <code style={{ background: "rgba(255,255,255,0.07)", padding: "3px 8px", borderRadius: 4, fontSize: 11, display: "inline-block", marginTop: 4 }}>
-                  semsplus.goodwe.com/station/<strong style={{color:"#00d4a0"}}>JOUW-ID</strong>/overview
+                  semsplus.goodwe.com/station/<strong style={{ color: "#00d4a0" }}>JOUW-ID</strong>/overview
                 </code>
               </p>
               <Field label="E-mailadres">
-                <input type="email" placeholder="jouw@email.nl" value={settings.goodwe_email} onChange={e => setSettings(s => ({...s, goodwe_email: e.target.value}))} style={inputStyle} />
+                <input type="email" placeholder="jouw@email.nl" value={settings.goodwe_email} onChange={e => setSettings(s => ({ ...s, goodwe_email: e.target.value }))} style={inputStyle} />
               </Field>
               <Field label={settings.goodwe_has_password ? "Wachtwoord (opgeslagen – laat leeg om te behouden)" : "Wachtwoord"}>
-                <input type="password" placeholder={settings.goodwe_has_password ? "••••••••" : "SEMSPlus wachtwoord"} value={settings.goodwe_password} onChange={e => setSettings(s => ({...s, goodwe_password: e.target.value}))} style={inputStyle} />
+                <input type="password" placeholder={settings.goodwe_has_password ? "••••••••" : "SEMSPlus wachtwoord"} value={settings.goodwe_password} onChange={e => setSettings(s => ({ ...s, goodwe_password: e.target.value }))} style={inputStyle} />
               </Field>
               <Field label="Station ID">
-                <input type="text" placeholder="12345678-abcd-1234-efgh-123456789012" value={settings.goodwe_station_id} onChange={e => setSettings(s => ({...s, goodwe_station_id: e.target.value}))} style={inputStyle} />
+                <input type="text" placeholder="12345678-abcd-1234-efgh-123456789012" value={settings.goodwe_station_id} onChange={e => setSettings(s => ({ ...s, goodwe_station_id: e.target.value }))} style={inputStyle} />
               </Field>
               <Field label="IP-adres omvormer (optioneel – voor lokale uitlezing zonder cloud)">
-                <input type="text" placeholder="192.168.1.100" value={settings.goodwe_inverter_ip} onChange={e => setSettings(s => ({...s, goodwe_inverter_ip: e.target.value}))} style={inputStyle} />
+                <input type="text" placeholder="192.168.1.100" value={settings.goodwe_inverter_ip} onChange={e => setSettings(s => ({ ...s, goodwe_inverter_ip: e.target.value }))} style={inputStyle} />
                 <div style={{ fontSize: 11, color: "#405060", marginTop: 5, lineHeight: 1.6 }}>
-                  Vul het lokale IP-adres in van je GoodWe omvormer (te vinden in je router).<br/>
-                  Gebruikt UDP poort 8899 — hetzelfde protocol als de Home Assistant integratie.<br/>
+                  Vul het lokale IP-adres in van je GoodWe omvormer (te vinden in je router).<br />
+                  Gebruikt UDP poort 8899 — hetzelfde protocol als de Home Assistant integratie.<br />
                   Maanddata is niet lokaal beschikbaar; cloud sync blijft nodig voor historische data.
                 </div>
               </Field>
@@ -624,8 +864,8 @@ export default function App() {
 
             <Section title="Eneco eMobility" icon="🚗" badge="Handmatig" badgeOk={false}>
               <p style={{ color: "#607898", fontSize: 12, lineHeight: 1.7 }}>
-                Eneco eMobility heeft helaas <strong style={{color:"#e76f51"}}>geen publieke API</strong> beschikbaar voor de vergoedingsdata.<br/>
-                Voer de maandelijkse laadvergoeding handmatig in via de <strong style={{color:"#9ab"}}>Invoer</strong> pagina (het veld "Laadvergoeding EV").<br/><br/>
+                Eneco eMobility heeft helaas <strong style={{ color: "#e76f51" }}>geen publieke API</strong> beschikbaar voor de vergoedingsdata.<br />
+                Voer de maandelijkse laadvergoeding handmatig in via de <strong style={{ color: "#9ab" }}>Invoer</strong> pagina (het veld "Laadvergoeding EV").<br /><br />
                 Het bedrag staat op je maandelijkse Eneco eMobility factuur of in de app onder <em>Laadvergoeding</em>.
               </p>
             </Section>
@@ -646,16 +886,16 @@ export default function App() {
                 <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: "#9ab" }}>Laatste sync resultaat</div>
                 {syncResult.tibber && <div style={{ fontSize: 13, color: "#00d4a0", marginBottom: 6 }}>✓ Tibber: {syncResult.tibber}</div>}
                 {syncResult.goodwe && <div style={{ fontSize: 13, color: "#00d4a0", marginBottom: 6 }}>✓ GoodWe: {syncResult.goodwe}</div>}
-                {syncResult.errors?.map((e,i) => <div key={i} style={{ fontSize: 12, color: "#ff6666", marginTop: 6 }}>✗ {e}</div>)}
+                {syncResult.errors?.map((e, i) => <div key={i} style={{ fontSize: 12, color: "#ff6666", marginTop: 6 }}>✗ {e}</div>)}
               </div>
             )}
 
             <div style={{ background: "rgba(0,128,255,0.06)", border: "1px solid rgba(0,128,255,0.18)", borderRadius: 12, padding: 20 }}>
               <div style={{ fontSize: 12, fontWeight: 600, color: "#6ab", marginBottom: 10 }}>ℹ Databronnen overzicht</div>
               <div style={{ fontSize: 12, color: "#607898", lineHeight: 1.8 }}>
-                • <strong style={{color:"#9ab"}}>Tibber</strong> → verbruik, teruggeleverd + kosten via API (automatisch)<br/>
-                • <strong style={{color:"#9ab"}}>GoodWe SEMSPlus</strong> → opgewekt via API (automatisch, met terugval op oud portal)<br/>
-                • <strong style={{color:"#a78bfa"}}>Eneco eMobility</strong> → laadvergoeding handmatig invoeren (geen API)<br/>
+                • <strong style={{ color: "#9ab" }}>Tibber</strong> → verbruik, teruggeleverd + kosten via API (automatisch)<br />
+                • <strong style={{ color: "#9ab" }}>GoodWe SEMSPlus</strong> → opgewekt via API (automatisch, met terugval op oud portal)<br />
+                • <strong style={{ color: "#a78bfa" }}>Eneco eMobility</strong> → laadvergoeding handmatig invoeren (geen API)<br />
                 • Handmatige invoer wordt nooit overschreven door sync
               </div>
             </div>
@@ -668,31 +908,31 @@ export default function App() {
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }} onClick={() => setEditModal(null)}>
           <div style={{ background: "#0d1929", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 16, padding: 32, width: 420, maxWidth: "90vw" }} onClick={e => e.stopPropagation()}>
             <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 600, margin: "0 0 24px", fontSize: 18 }}>
-              {MAANDEN_LANG[editModal.maand-1]} {editModal.jaar}
+              {MAANDEN_LANG[editModal.maand - 1]} {editModal.jaar}
             </h3>
             {[
-              ["verbruik","Verbruik","kWh","#4488ff"],
-              ["opgewekt","Opgewekt door zonnepanelen","kWh","#00d4a0"],
-              ["teruggeleverd","Teruggeleverd aan net","kWh","#f4a261"],
-              ["kosten","Bruto kosten","€","#e76f51"],
-              ["laadvergoeding","Laadvergoeding Eneco eMobility","€","#a78bfa"],
-              ["teruglevering_vergoeding","Teruglevering vergoeding (Tibber)","€","#34d399"],
+              ["verbruik", "Verbruik", "kWh", "#4488ff"],
+              ["opgewekt", "Opgewekt door zonnepanelen", "kWh", "#00d4a0"],
+              ["teruggeleverd", "Teruggeleverd aan net", "kWh", "#f4a261"],
+              ["kosten", "Bruto kosten", "€", "#e76f51"],
+              ["laadvergoeding", "Laadvergoeding Eneco eMobility", "€", "#a78bfa"],
+              ["teruglevering_vergoeding", "Teruglevering vergoeding (Tibber)", "€", "#34d399"],
             ].map(([key, label, unit, color]) => (
               <div key={key} style={{ marginBottom: 14 }}>
                 <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#607898", marginBottom: 6 }}>
                   <span style={{ width: 8, height: 8, borderRadius: "50%", background: color, display: "inline-block" }} />
                   {label} ({unit})
                 </label>
-                <input type="number" step="0.01" min="0" value={form[key] || ""} onChange={e => setForm(f => ({...f, [key]: e.target.value}))}
+                <input type="number" step="0.01" min="0" value={form[key] || ""} onChange={e => setForm(f => ({ ...f, [key]: e.target.value }))}
                   placeholder={key === "laadvergoeding" || key === "teruglevering_vergoeding" ? "0.00 – optioneel" : ""}
                   style={{ ...inputStyle, borderColor: form[key] > 0 && (key === "laadvergoeding" || key === "teruglevering_vergoeding") ? `rgba(${key === "laadvergoeding" ? "167,139,250" : "52,211,153"},0.4)` : "rgba(255,255,255,0.12)" }} />
               </div>
             ))}
             {(form.kosten > 0 || form.laadvergoeding > 0 || form.teruglevering_vergoeding > 0) && (
               <div style={{ background: "rgba(0,212,160,0.08)", border: "1px solid rgba(0,212,160,0.2)", borderRadius: 8, padding: "10px 14px", marginBottom: 14, fontSize: 13 }}>
-                Netto kosten: <strong style={{color:"#00d4a0"}}>{fmtEur((Number(form.kosten)||0) - (Number(form.laadvergoeding)||0) - (Number(form.teruglevering_vergoeding)||0))}</strong>
+                Netto kosten: <strong style={{ color: "#00d4a0" }}>{fmtEur((Number(form.kosten) || 0) - (Number(form.laadvergoeding) || 0) - (Number(form.teruglevering_vergoeding) || 0))}</strong>
                 {(form.laadvergoeding > 0 || form.teruglevering_vergoeding > 0) && (
-                  <span style={{color:"#607898", fontSize:11, marginLeft:8}}>
+                  <span style={{ color: "#607898", fontSize: 11, marginLeft: 8 }}>
                     ({form.laadvergoeding > 0 ? `EV ${fmtEur(Number(form.laadvergoeding))}` : ""}{form.laadvergoeding > 0 && form.teruglevering_vergoeding > 0 ? " + " : ""}{form.teruglevering_vergoeding > 0 ? `teruglev. ${fmtEur(Number(form.teruglevering_vergoeding))}` : ""})
                   </span>
                 )}
@@ -722,16 +962,16 @@ export default function App() {
               <div style={{ color: "#00d4a0", fontWeight: 600, marginBottom: 8 }}>📋 Verwacht CSV-formaat</div>
               <div style={{ color: "#607898", marginBottom: 8 }}>Verplichte kolommen (komma of puntkomma als scheidingsteken):</div>
               <code style={{ display: "block", background: "rgba(0,0,0,0.3)", borderRadius: 6, padding: "8px 12px", color: "#e8f0fe", fontFamily: "monospace", fontSize: 11, lineHeight: 1.8, whiteSpace: "pre-wrap" }}>
-{`jaar;maand;verbruik;opgewekt;teruggeleverd;kosten;laadvergoeding;teruglevering_vergoeding
+                {`jaar;maand;verbruik;opgewekt;teruggeleverd;kosten;laadvergoeding;teruglevering_vergoeding
 2024;1;342.5;180.2;95.1;89.34;12.50;8.20
 2024;2;298.7;210.4;110.6;76.15;11.80;9.40`}
               </code>
               <div style={{ color: "#607898", marginTop: 10, lineHeight: 1.7 }}>
-                • <strong style={{color:"#9ab"}}>jaar</strong> — 4-cijferig jaar (bijv. 2024)<br/>
-                • <strong style={{color:"#9ab"}}>maand</strong> — 1 t/m 12<br/>
-                • <strong style={{color:"#9ab"}}>verbruik / opgewekt / teruggeleverd</strong> — kWh (decimaal met punt of komma)<br/>
-                • <strong style={{color:"#9ab"}}>kosten</strong> — bruto kosten in € (decimaal)<br/>
-                • <strong style={{color:"#607898"}}>laadvergoeding / teruglevering_vergoeding</strong> — optioneel, € (0 als leeg)
+                • <strong style={{ color: "#9ab" }}>jaar</strong> — 4-cijferig jaar (bijv. 2024)<br />
+                • <strong style={{ color: "#9ab" }}>maand</strong> — 1 t/m 12<br />
+                • <strong style={{ color: "#9ab" }}>verbruik / opgewekt / teruggeleverd</strong> — kWh (decimaal met punt of komma)<br />
+                • <strong style={{ color: "#9ab" }}>kosten</strong> — bruto kosten in € (decimaal)<br />
+                • <strong style={{ color: "#607898" }}>laadvergoeding / teruglevering_vergoeding</strong> — optioneel, € (0 als leeg)
               </div>
             </div>
 
@@ -765,7 +1005,7 @@ export default function App() {
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                     <thead>
                       <tr style={{ background: "rgba(255,255,255,0.06)", position: "sticky", top: 0 }}>
-                        {["Jaar","Maand","Verbruik","Opgewekt","Teruggelev.","Kosten","Laadverg.","TL Verg."].map(h => (
+                        {["Jaar", "Maand", "Verbruik", "Opgewekt", "Teruggelev.", "Kosten", "Laadverg.", "TL Verg."].map(h => (
                           <th key={h} style={{ padding: "8px 10px", textAlign: "left", color: "#607898", fontWeight: 500, whiteSpace: "nowrap" }}>{h}</th>
                         ))}
                       </tr>
@@ -774,7 +1014,7 @@ export default function App() {
                       {csvPreview.map((r, i) => (
                         <tr key={i} style={{ borderTop: "1px solid rgba(255,255,255,0.05)" }}>
                           <td style={{ padding: "7px 10px", color: "#9ab" }}>{r.jaar}</td>
-                          <td style={{ padding: "7px 10px", color: "#9ab" }}>{MAANDEN[r.maand-1]}</td>
+                          <td style={{ padding: "7px 10px", color: "#9ab" }}>{MAANDEN[r.maand - 1]}</td>
                           <td style={{ padding: "7px 10px", color: "#4488ff" }}>{r.verbruik}</td>
                           <td style={{ padding: "7px 10px", color: "#00d4a0" }}>{r.opgewekt}</td>
                           <td style={{ padding: "7px 10px", color: "#f4a261" }}>{r.teruggeleverd}</td>

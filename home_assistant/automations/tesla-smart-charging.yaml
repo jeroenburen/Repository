@@ -5,8 +5,9 @@ description: >
   wake-up handling, hysteresis, rate limiting and notifications.
 
   Required helpers:
-    - input_datetime.tesla_charge_ready_by  (time only, 00:00 = disabled)
-    - input_number.tesla_charge_target_soc  (default 80, min 20, max 100)
+    - input_datetime.tesla_charge_ready_by    (time only, 00:00 = disabled)
+    - input_number.tesla_charge_target_soc    (default 80, min 20, max 100)
+    - input_boolean.tesla_fast_charge_selector (on = scheduled charging active)
 triggers:
   - trigger: state
     entity_id: device_tracker.karrotenmobiel_location_tracker
@@ -58,7 +59,8 @@ actions:
     then:
       - action: button.press
         target:
-          entity_id: button.karrotenmobiel_force_update
+          entity_id: button.karrotenmobiel_force_data_update
+        data: {}
       - variables:
           wake_start: "{{ now().timestamp() }}"
       - repeat:
@@ -95,6 +97,7 @@ actions:
               notification_id: tesla_charging_status
           - stop: Car did not wake within timeout.
   - variables:
+      current_soc: "{{ states('sensor.karrotenmobiel_battery') | int(0) }}"
       target_soc: "{{ states('input_number.tesla_charge_target_soc') | int(80) }}"
       price_level: "{{ states('sensor.witrikstraat_4_current_price_level') }}"
       p1_power: "{{ states('sensor.p1_meter_power') | float(0) }}"
@@ -103,23 +106,53 @@ actions:
       solar_amps: |
         {{ [[((solar_surplus_w / 690) | int), 5] | max, 16] | min }}
       has_solar: "{{ solar_surplus_w > 1400 }}"
+      p_now: "{{ states('sensor.witrikstraat_4_current_price') | float(999) }}"
+      p1: "{{ states('sensor.witrikstraat_4_price_next_1h') | float(999) }}"
+      p2: "{{ states('sensor.witrikstraat_4_price_next_2h') | float(999) }}"
+      p3: "{{ states('sensor.witrikstraat_4_price_next_3h') | float(999) }}"
+      p4: "{{ states('sensor.witrikstraat_4_price_next_4h') | float(999) }}"
+      p5: "{{ states('sensor.witrikstraat_4_price_next_5h') | float(999) }}"
+      cheap_hours: |
+        {% set h = namespace(value=1) %} {% if p1 <= p_now %}
+          {% set h.value = h.value + 1 %}
+          {% if p2 <= p_now %}
+            {% set h.value = h.value + 1 %}
+            {% if p3 <= p_now %}
+              {% set h.value = h.value + 1 %}
+              {% if p4 <= p_now %}
+                {% set h.value = h.value + 1 %}
+                {% if p5 <= p_now %}
+                  {% set h.value = h.value + 1 %}
+                {% endif %}
+              {% endif %}
+            {% endif %}
+          {% endif %}
+        {% endif %} {{ h.value }}
+      cheap_amps: >
+        {% set energy_needed = (target_soc - current_soc) / 100 * 60 %} {% set
+        power_needed_kw = (energy_needed / 0.9) / cheap_hours %} {% set amps =
+        (power_needed_kw / 11 * 16) | round(0, 'ceil') | int %} {{ [[amps, 5] |
+        max, 16] | min }}
       ready_by: "{{ states('input_datetime.tesla_charge_ready_by') }}"
       schedule_active: "{{ ready_by != '00:00:00' }}"
+      fast_charge_on: "{{ states('input_boolean.tesla_fast_charge_selector') == 'on' }}"
       minutes_until_ready: |
         {% if ready_by == '00:00:00' %}
           0
         {% else %}
-          {% set t = today_at(ready_by) %}
+          {% set t = today_at(ready_by[:5]) %}
           {% if t < now() %}
             {{ ((t + timedelta(days=1) - now()).total_seconds() / 60) | int }}
           {% else %}
             {{ ((t - now()).total_seconds() / 60) | int }}
           {% endif %}
         {% endif %}
-      current_price: "{{ states('sensor.witrikstraat_4_current_price') | float(999) }}"
-      price_next_5h: "{{ states('sensor.witrikstraat_4_price_next_5h') | float(999) }}"
-      price_is_good_for_schedule: |
-        {{ current_price <= price_next_5h or minutes_until_ready < 120 }}
+      scheduled_amps: >
+        {% set energy_needed = (target_soc - current_soc) / 100 * 60 %} {% set
+        hours_until_ready = minutes_until_ready / 60 %} {% set power_needed_kw =
+        (energy_needed / 0.9) / hours_until_ready %} {% set amps =
+        (power_needed_kw / 11 * 16) | round(0, 'ceil') | int %} {{ [[amps, 5] |
+        max, 16] | min }}
       trigger_reason: >
         {% if trigger.id == 'car_arrived' %} Car arrived home {% elif trigger.id
         == 'plug_connected' %} Charger plugged in {% elif trigger.id ==
@@ -130,8 +163,7 @@ actions:
         {% else %} Manual Trigger {% endif %}
   - if:
       - condition: template
-        value_template: |
-          {{ states('sensor.karrotenmobiel_battery') | int(0) >= target_soc }}
+        value_template: "{{ current_soc >= target_soc }}"
     then:
       - action: switch.turn_off
         target:
@@ -142,7 +174,7 @@ actions:
           message: |
             Battery has reached {{ target_soc }}% target. Charging stopped.
             Trigger: {{ trigger_reason }}
-            Battery: {{ states('sensor.karrotenmobiel_battery') }}%
+            Battery: {{ current_soc }}%
           notification_id: tesla_charging_status
       - stop: Battery at charge limit.
   - choose:
@@ -154,14 +186,14 @@ actions:
               - condition: template
                 value_template: >
                   {{ states('number.karrotenmobiel_charging_amps') | int(-1) !=
-                  16
+                  cheap_amps
                      or states('switch.karrotenmobiel_charger') == 'off' }}
             then:
               - action: number.set_value
                 target:
                   entity_id: number.karrotenmobiel_charging_amps
                 data:
-                  value: 16
+                  value: "{{ cheap_amps }}"
               - action: switch.turn_on
                 target:
                   entity_id: switch.karrotenmobiel_charger
@@ -169,12 +201,15 @@ actions:
                 data:
                   title: Tesla Charging started
                   message: >
-                    Charging at full speed (16A) because the energy price is {{
-                    price_level }}.
+                    Charging at {{ cheap_amps }}A — price is {{ price_level }}
+                    with {{ cheap_hours }}h of cheap pricing remaining.
+
+                    Energy needed: {{ ((target_soc - current_soc) / 100 * 60) |
+                    round(1) }} kWh.
 
                     Trigger: {{ trigger_reason }}
 
-                    Battery: {{ states('sensor.karrotenmobiel_battery') }}%
+                    Battery: {{ current_soc }}%
                   notification_id: tesla_charging_status
       - conditions:
           - condition: template
@@ -204,28 +239,27 @@ actions:
 
                     Trigger: {{ trigger_reason }}
 
-                    Battery: {{ states('sensor.karrotenmobiel_battery') }}%
+                    Battery: {{ current_soc }}%
                   notification_id: tesla_charging_status
       - conditions:
           - condition: template
             value_template: |
-              {{ schedule_active
-                 and price_is_good_for_schedule
-                 and minutes_until_ready > 0
-                 and minutes_until_ready < 480 }}
+              {{ fast_charge_on
+                 and schedule_active
+                 and minutes_until_ready > 0 }}
         sequence:
           - if:
               - condition: template
                 value_template: >
                   {{ states('number.karrotenmobiel_charging_amps') | int(-1) !=
-                  16
+                  scheduled_amps
                      or states('switch.karrotenmobiel_charger') == 'off' }}
             then:
               - action: number.set_value
                 target:
                   entity_id: number.karrotenmobiel_charging_amps
                 data:
-                  value: 16
+                  value: "{{ scheduled_amps }}"
               - action: switch.turn_on
                 target:
                   entity_id: switch.karrotenmobiel_charger
@@ -233,26 +267,25 @@ actions:
                 data:
                   title: Tesla Charging started (Scheduled)
                   message: >
-                    Charging at 16A — current price ({{ current_price }}) is at
-                    or below average next 5h ({{ price_next_5h }}), or deadline
-                    is within 2h.
+                    Charging at {{ scheduled_amps }}A to reach {{ target_soc }}%
+                    by {{ ready_by[:5] }}.
 
-                    Ready by: {{ ready_by }} ({{ minutes_until_ready }} min
-                    away).
+                    Energy needed: {{ ((target_soc - current_soc) / 100 * 60) |
+                    round(1) }} kWh, time remaining: {{ minutes_until_ready }}
+                    min.
 
                     Trigger: {{ trigger_reason }}
 
-                    Battery: {{ states('sensor.karrotenmobiel_battery') }}%
+                    Battery: {{ current_soc }}%
                   notification_id: tesla_charging_status
       - conditions:
           - condition: template
             value_template: |
               {{ not price_is_cheap
                  and not has_solar
-                 and not (schedule_active
-                          and price_is_good_for_schedule
-                          and minutes_until_ready > 0
-                          and minutes_until_ready < 480) }}
+                 and not (fast_charge_on
+                          and schedule_active
+                          and minutes_until_ready > 0) }}
         sequence:
           - if:
               - condition: state
@@ -271,6 +304,6 @@ actions:
 
                 Trigger: {{ trigger_reason }}
 
-                Battery: {{ states('sensor.karrotenmobiel_battery') }}%
+                Battery: {{ current_soc }}%
               notification_id: tesla_charging_status
 mode: restart

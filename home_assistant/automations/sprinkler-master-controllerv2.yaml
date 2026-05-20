@@ -1,0 +1,133 @@
+alias: "Sprinkler: Master Controller"
+description: Sliding window rain + temp tracking
+triggers:
+  - trigger: sun
+    event: sunrise
+    id: check_watering
+  - trigger: state
+    entity_id: sensor.openweathermap_temperature
+    id: temp_update
+  - trigger: state
+    entity_id: sensor.openweathermap_rain
+    id: rain_update
+
+variables:
+  window_days: 7
+  log_raw: "{{ states('input_text.daily_weather_log') }}"
+  log: >-
+    {% if log_raw in ['', 'unknown', 'unavailable'] %}
+      []
+    {% else %}
+      {{ log_raw | from_json }}
+    {% endif %}
+  # Rolling sums over the window
+  total_rain: >-
+    {{ log | selectattr('date', 'ge',
+         (now() - timedelta(days=window_days)).strftime('%Y-%m-%d'))
+       | sum(attribute='rain') | float(0) }}
+  max_temp: >-
+    {{ (log | selectattr('date', 'ge',
+         (now() - timedelta(days=window_days)).strftime('%Y-%m-%d'))
+       | map(attribute='max_temp') | list | max) | default(0) | float(0) }}
+  days_since: "{{ states('sensor.days_since_last_watering_day') | float(0) }}"
+  forecast_rain: "{{ states('sensor.openweathermap_forecast_precipitation') | float(0) }}"
+
+actions:
+  - choose:
+      # ── Track intra-day max temperature ──────────────────────────
+      - conditions:
+          - condition: trigger
+            id: temp_update
+          - condition: state
+            entity_id: sensor.current_temperature_is_higher
+            state: "True"
+        sequence:
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.maximum_temperature_measured
+            data:
+              value: "{{ states('sensor.openweathermap_temperature') | float(0) }}"
+
+      # ── Accumulate rain within the day ───────────────────────────
+      - conditions:
+          - condition: trigger
+            id: rain_update
+        sequence:
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.total_rain_fallen
+            data:
+              value: >-
+                {{ states('input_number.total_rain_fallen') | float(0) +
+                   states('sensor.openweathermap_rain') | float(0) }}
+
+      # ── Sunrise: snapshot yesterday, then decide ──────────────────
+      - conditions:
+          - condition: trigger
+            id: check_watering
+        sequence:
+          # 1. Append yesterday's collected data as a new daily entry
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.daily_weather_log
+            data:
+              value: >-
+                {% set yesterday = (now() - timedelta(days=1)).strftime('%Y-%m-%d') %}
+                {% set new_entry = {
+                     'date': yesterday,
+                     'rain': states('input_number.total_rain_fallen') | float(0),
+                     'max_temp': states('input_number.maximum_temperature_measured') | float(0)
+                   } %}
+                {% set cutoff = (now() - timedelta(days=window_days)).strftime('%Y-%m-%d') %}
+                {% set trimmed = log | selectattr('date', 'ge', cutoff) | list %}
+                {{ (trimmed + [new_entry]) | to_json }}
+
+          # 2. Reset the intra-day accumulators
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.total_rain_fallen
+            data:
+              value: 0
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.maximum_temperature_measured
+            data:
+              value: 0
+
+          # 3. Make the watering decision using rolling window values
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{ days_since > 3.5 and max_temp > 31 and total_rain < 15
+                         and forecast_rain < 1 }}
+                sequence:
+                  - action: input_number.set_value
+                    target:
+                      entity_id: input_number.watering_duration
+                    data:
+                      value: 120
+                  - action: script.water_the_garden
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{ days_since > 4.5 and max_temp > 25 and total_rain < 15
+                         and forecast_rain < 1 }}
+                sequence:
+                  - action: input_number.set_value
+                    target:
+                      entity_id: input_number.watering_duration
+                    data:
+                      value: 90
+                  - action: script.water_the_garden
+            default:
+              - action: notify.persistent_notification
+                data:
+                  title: Sprinkler Skip
+                  message: >-
+                    Sunrise check: No watering needed ({{ days_since | round(1) }} days
+                    since last, {{ total_rain | round(1) }}mm rain in last {{ window_days }}
+                    days, peak {{ max_temp | round(1) }}°C).
+
+mode: parallel
+max: 10

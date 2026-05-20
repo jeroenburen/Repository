@@ -881,3 +881,108 @@ app.get('/api/dagmetingen/:jaar/:maand', (req, res) => {
 });
 
 app.listen(3001, () => console.log('Backend running on port 3001'));
+
+// ─── Batterij advies API ─────────────────────────────────────────────────────
+
+app.get('/api/batterij/analyse', (req, res) => {
+  const rows = db.prepare('SELECT * FROM metingen ORDER BY jaar ASC, maand ASC').all();
+  if (rows.length < 6) {
+    return res.status(400).json({ error: 'Onvoldoende data (minimaal 6 maanden nodig)' });
+  }
+
+  // Per maand: hoeveel hadden we kunnen opslaan?
+  // Potentieel op te slaan = min(teruggeleverd, gevraagde_capaciteit)
+  // Besparing = potentieel_opgeslagen * (inkooptarief - teruglevertarief)
+
+  const maandData = rows.map(r => ({
+    jaar: r.jaar,
+    maand: r.maand,
+    verbruik: r.verbruik || 0,
+    opgewekt: r.opgewekt || 0,
+    teruggeleverd: r.teruggeleverd || 0,
+    kosten: r.kosten || 0,
+    teruglevering_vergoeding: r.teruglevering_vergoeding || 0,
+  }));
+
+  // Bereken gemiddeld inkooptarief per kWh uit de data
+  const maandenMetKosten = maandData.filter(r => r.kosten > 0 && r.verbruik > 0);
+  let gemInkoopTarief = 0.27; // default
+  if (maandenMetKosten.length > 0) {
+    const totalKosten = maandenMetKosten.reduce((s, r) => s + r.kosten, 0);
+    const totalNetto = maandenMetKosten.reduce((s, r) => s + r.verbruik - r.opgewekt + r.teruggeleverd, 0);
+    if (totalNetto > 0) gemInkoopTarief = totalKosten / totalNetto;
+    // Clamp naar realistisch bereik
+    gemInkoopTarief = Math.min(0.50, Math.max(0.18, gemInkoopTarief));
+  }
+
+  // Gemiddeld teruglevertarief
+  const maandenMetTL = maandData.filter(r => r.teruglevering_vergoeding > 0 && r.teruggeleverd > 0);
+  let gemTerugleverTarief = 0.05;
+  if (maandenMetTL.length > 0) {
+    const totalProfit = maandenMetTL.reduce((s, r) => s + r.teruglevering_vergoeding, 0);
+    const totalTL = maandenMetTL.reduce((s, r) => s + r.teruggeleverd, 0);
+    if (totalTL > 0) gemTerugleverTarief = totalProfit / totalTL;
+    gemTerugleverTarief = Math.min(0.25, Math.max(0.01, gemTerugleverTarief));
+  }
+
+  const besparingPerKwh = Math.max(0.01, gemInkoopTarief - gemTerugleverTarief);
+
+  // Maandelijkse teruggeleverde energie (gemiddeld per maand)
+  const totaalTeruggleverd = maandData.reduce((s, r) => s + r.teruggeleverd, 0);
+  const aantalMaanden = maandData.length;
+  const gemTerugPerMaand = totaalTeruggleverd / aantalMaanden;
+
+  // Daggemiddelde teruggeleverd (als benadering van dagelijkse laadcycli)
+  const gemTerugPerDag = gemTerugPerMaand / 30.5;
+
+  // Seizoensverdeling: zomer vs winter
+  const zomerMaanden = maandData.filter(r => r.maand >= 4 && r.maand <= 9);
+  const winterMaanden = maandData.filter(r => r.maand < 4 || r.maand > 9);
+  const gemTerugZomer = zomerMaanden.length > 0 ? zomerMaanden.reduce((s, r) => s + r.teruggeleverd, 0) / zomerMaanden.length : 0;
+  const gemTerugWinter = winterMaanden.length > 0 ? winterMaanden.reduce((s, r) => s + r.teruggeleverd, 0) / winterMaanden.length : 0;
+
+  // Capaciteitsadvies: 80-100% van de gemiddelde dagelijkse teruglevering
+  // maar begrensd door seizoenspatroon
+  const adviesCapaciteit = Math.round(Math.min(gemTerugPerDag * 1.0, gemTerugZomer / 25) * 2) / 2;
+
+  // Capaciteiten om te evalueren: 3 t/m 20 kWh in stappen van 0.5
+  const capaciteiten = [];
+  for (let cap = 3; cap <= 20; cap += 0.5) {
+    capaciteiten.push(Math.round(cap * 10) / 10);
+  }
+
+  // Voor elke capaciteit: bereken jaarlijkse besparing
+  // Aanname: dagelijkse opslag = min(gemTerugPerDag, cap) met round-trip eff 0.92
+  const roundTripEff = 0.92;
+
+  // Gebruik maanddata om realistischere berekening te doen per maand
+  const capaciteitAnalyse = capaciteiten.map(cap => {
+    let jaarBesparing = 0;
+    for (const m of maandData) {
+      const dagenInMaand = new Date(m.jaar, m.maand, 0).getDate();
+      const dagTL = m.teruggeleverd / dagenInMaand;
+      const opgeslagenPerDag = Math.min(dagTL, cap) * roundTripEff;
+      jaarBesparing += opgeslagenPerDag * dagenInMaand * besparingPerKwh;
+    }
+    // Schaal naar jaarlijkse besparing op basis van beschikbare data
+    const jaarFactor = 12 / aantalMaanden;
+    return { cap, jaarBesparing: jaarBesparing * jaarFactor };
+  });
+
+  res.json({
+    samenvatting: {
+      aantalMaanden,
+      totaalTeruggleverd: Math.round(totaalTeruggleverd * 10) / 10,
+      gemTerugPerMaand: Math.round(gemTerugPerMaand * 10) / 10,
+      gemTerugPerDag: Math.round(gemTerugPerDag * 100) / 100,
+      gemTerugZomer: Math.round(gemTerugZomer * 10) / 10,
+      gemTerugWinter: Math.round(gemTerugWinter * 10) / 10,
+      gemInkoopTarief: Math.round(gemInkoopTarief * 1000) / 1000,
+      gemTerugleverTarief: Math.round(gemTerugleverTarief * 1000) / 1000,
+      besparingPerKwh: Math.round(besparingPerKwh * 1000) / 1000,
+      adviesCapaciteit: Math.max(3, adviesCapaciteit),
+    },
+    maandData,
+    capaciteitAnalyse,
+  });
+});

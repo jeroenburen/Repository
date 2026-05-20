@@ -915,23 +915,24 @@ def period_comparison():
 
     def totals_for_period(start, end):
         rows = conn.execute(
-            "SELECT category, SUM(amount) as total FROM transactions "
-            "WHERE strftime('%Y-%m', date) BETWEEN ? AND ? GROUP BY category",
+            "SELECT category, amount FROM transactions "
+            "WHERE strftime('%Y-%m', date) BETWEEN ? AND ?",
             (start, end)
         ).fetchall()
         income = expense = 0.0
         by_cat = {}
         for row in rows:
             cat = row['category'] or 'Niet gecategoriseerd'
-            amt = row['total']
-            by_cat[cat] = amt
-            if cat in INCOME_CATS:
-                income += amt
-            elif cat in MIXED_CATS:
+            amt = row['amount']
+            if cat in MIXED_CATS:
+                key = f"{cat}::income" if amt >= 0 else f"{cat}::expense"
+                by_cat[key] = by_cat.get(key, 0) + amt
                 if amt >= 0: income  += amt
                 else:        expense += amt
             else:
-                expense += amt
+                by_cat[cat] = by_cat.get(cat, 0) + amt
+                if cat in INCOME_CATS: income  += amt
+                else:                  expense += amt
         return round(income, 2), round(abs(expense), 2), {k: round(v, 2) for k, v in by_cat.items()}
 
     income_a, expense_a, cats_a = totals_for_period(start_a, end_a)
@@ -943,27 +944,36 @@ def period_comparison():
     all_cats = sorted(set(list(cats_a.keys()) + list(cats_b.keys())))
     categories = []
     for cat in all_cats:
-        amt_a   = cats_a.get(cat, 0.0)
-        amt_b   = cats_b.get(cat, 0.0)
-        amt_ref = amt_a if amt_a != 0 else amt_b
-        if cat in INCOME_CATS:
-            side = 'income'
-        elif cat in MIXED_CATS:
-            side = 'income' if amt_ref >= 0 else 'expense'
+        amt_a = cats_a.get(cat, 0.0)
+        amt_b = cats_b.get(cat, 0.0)
+        # Detect MIXED_CATS split keys like "Beleggen::income" / "Beleggen::expense"
+        base_cat, _, split = cat.partition('::')
+        if split == 'income':
+            side         = 'income'
+            display_name = base_cat
+        elif split == 'expense':
+            side         = 'expense'
+            display_name = base_cat
+            amt_a = abs(amt_a)
+            amt_b = abs(amt_b)
+        elif cat in INCOME_CATS:
+            side         = 'income'
+            display_name = cat
         else:
-            side = 'expense'
+            side         = 'expense'
+            display_name = cat
             amt_a = abs(amt_a)
             amt_b = abs(amt_b)
         diff = round(amt_b - amt_a, 2)
         pct  = round(diff / amt_a * 100, 1) if amt_a != 0 else None
         categories.append({
-            'category': cat,
+            'category': display_name,
             'side':     side,
             'period_a': amt_a,
             'period_b': amt_b,
             'diff':     diff,
             'pct':      pct,
-            'color':    colors.get(cat, '#666'),
+            'color':    colors.get(base_cat if split else cat, '#666'),
         })
 
     return jsonify({

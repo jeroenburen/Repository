@@ -1,0 +1,85 @@
+alias: "Sprinkler: Master Controller"
+description: Handles data tracking and daily watering logic in one place
+triggers:
+  - trigger: sun
+    event: sunrise
+    id: check_watering
+  - trigger: state
+    entity_id: sensor.openweathermap_temperature
+    id: temp_update
+  - trigger: state
+    entity_id: sensor.openweathermap_rain
+    id: rain_update
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: temp_update
+          - condition: state
+            entity_id: sensor.current_temperature_is_higher
+            state: "True"
+        sequence:
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.maximum_temperature_measured
+            data:
+              value: "{{ states('sensor.openweathermap_temperature') | float(0) }}"
+      - conditions:
+          - condition: trigger
+            id: rain_update
+        sequence:
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.total_rain_fallen
+            data:
+              value: |-
+                {{ states('input_number.total_rain_fallen') | float(0) +
+                   states('sensor.openweathermap_rain') | float(0) }}
+      - conditions:
+          - condition: trigger
+            id: check_watering
+        sequence:
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{ days_since > 3.5 and max_temp > 31 and total_rain < 15
+                      and forecast_rain < 1 }}
+                sequence:
+                  - action: input_number.set_value
+                    target:
+                      entity_id: input_number.watering_duration
+                    data:
+                      value: 120
+                  - action: script.water_the_garden
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{ days_since > 4.5 and max_temp > 25 and total_rain < 15
+                      and forecast_rain < 1 }}
+                sequence:
+                  - action: input_number.set_value
+                    target:
+                      entity_id: input_number.watering_duration
+                    data:
+                      value: 90
+                  - action: script.water_the_garden
+              - conditions:
+                  - condition: template
+                    value_template: "{{ days_since > 7.5 }}"
+                sequence:
+                  - action: script.reset_helper_values
+            default:
+              - action: notify.persistent_notification
+                data:
+                  title: Sprinkler Skip
+                  message: >-
+                    Sunrise check: No watering needed today ({{ days_since }}
+                    days since last).
+mode: parallel
+max: 10
+variables:
+  days_since: "{{ states('sensor.days_since_last_watering_day') | float(0) }}"
+  max_temp: "{{ states('input_number.maximum_temperature_measured') | float(0) }}"
+  total_rain: "{{ states('sensor.total_rain_fallen_plus_expected') | float(0) }}"
+  forecast_rain: "{{ states('sensor.openweathermap_forecast_precipitation') | float(0) }}"

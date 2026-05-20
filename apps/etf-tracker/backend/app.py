@@ -272,6 +272,30 @@ def get_latest_snapshot():
     d["positions"] = json.loads(d["positions"])
     return jsonify(d)
 
+@app.route("/api/snapshots/latest/positions", methods=["PUT"])
+def update_latest_positions():
+    """Replace positions in the latest snapshot (e.g. after manual remove/edit)."""
+    data = request.json
+    positions = data.get("positions", [])
+    conn = get_db()
+    row = conn.execute(
+        "SELECT id FROM portfolio_snapshots ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "No snapshot found"}), 404
+    snap_id = row["id"]
+    total = sum(p["waarde"] for p in positions)
+    for p in positions:
+        p["pct"] = round(p["waarde"] / total * 100, 2) if total > 0 else 0
+    conn.execute(
+        "UPDATE portfolio_snapshots SET positions=?, total_value=? WHERE id=?",
+        (json.dumps(positions), total, snap_id)
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"success": True, "positions": positions, "total": total})
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=False)
 
